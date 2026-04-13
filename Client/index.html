@@ -4,63 +4,119 @@
   <title>My VTT</title>
   <style>
     body { margin: 0; background: #1a1a2e; }
-    canvas { display: block; cursor: crosshair; }
 
-    /* NEWLY ADDED ─────────────────────────────────────────────────────────────
-       Styles for the role indicator badge that appears in the top-right corner.
+    /*
+     * NEWLY ADDED ─────────────────────────────────────────────────────────────
+     * The canvas no longer has hardcoded width/height attributes in HTML.
+     * Its pixel dimensions are set entirely by applyCanvasSize() in canvas.js
+     * once the admin configures the grid. Before that point the canvas is
+     * effectively 0×0 and invisible, which is the correct behaviour — the setup
+     * modal or waiting screen overlays the page during that window anyway.
+     *
+     * display: block prevents the default inline-element gap beneath the canvas.
+     * cursor: crosshair is kept as a clear visual signal that this is an
+     * interactive drawing surface.
+     * ─────────────────────────────────────────────────────────────────────────
+     */
+    canvas {
+        display: block;
+        cursor: crosshair;
+    }
 
-       This is a non-interactive HUD element — it just tells the user whether
-       they are currently the admin or a player. The background color is set
-       dynamically by applyClientRole() in canvas.js so it changes if the user
-       gets promoted. We only set the invariant structural styles here.
-    ─────────────────────────────────────────────────────────────────────────── */
+    /*
+     * NEWLY ADDED ─────────────────────────────────────────────────────────────
+     * Shared overlay base styles used by both the admin setup modal and the
+     * player waiting screen.
+     *
+     * Both overlays are full-viewport, sit above everything (z-index 3000),
+     * and use a dark semi-transparent backdrop. We define the shared properties
+     * here in CSS so the JavaScript only has to set the parts that differ
+     * (content, spinner vs. form, etc.).
+     *
+     * The overlays themselves are created and removed by canvas.js at runtime;
+     * this CSS is purely structural — it does not control visibility.
+     * ─────────────────────────────────────────────────────────────────────────
+     */
+    #canvas-setup-overlay,
+    #waiting-screen {
+        position: fixed;
+        inset: 0;                       /* Covers the full viewport */
+        background: rgba(0, 0, 0, 0.82);
+        z-index: 3000;                  /* Above role indicator (2000) and token menus (1000) */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: sans-serif;
+    }
+
+    /*
+     * NEWLY ADDED ─────────────────────────────────────────────────────────────
+     * The centered card inside the setup overlay.
+     * canvas.js injects this as a child div of #canvas-setup-overlay.
+     * Defined here so it can be overridden with a media query if needed later
+     * (e.g. full-width on narrow mobile screens).
+     * ─────────────────────────────────────────────────────────────────────────
+     */
+    #canvas-setup-overlay > div {
+        background: #1a1a2e;
+        border: 1px solid #444466;
+        border-radius: 10px;
+        padding: 28px 32px;
+        min-width: 300px;
+        max-width: 380px;
+        color: white;
+    }
+
+    /*
+     * Role indicator badge — structural styles only.
+     * Background color is set dynamically by applyClientRole() in canvas.js.
+     */
     #role-indicator {
         position: fixed;
         top: 12px;
         right: 12px;
-
-        /* Text and sizing */
         color: white;
         font-family: sans-serif;
         font-size: 13px;
         font-weight: bold;
         padding: 5px 12px;
-        border-radius: 20px;        /* Pill shape */
-
-        /* Keep it above the canvas and any token menus */
+        border-radius: 20px;
         z-index: 2000;
-
-        /* Subtle border so it reads on both light and dark backgrounds */
         border: 1px solid rgba(255, 255, 255, 0.2);
-
-        /* Placeholder background before applyClientRole() fires.
-           This avoids a flash of an unstyled element on load. */
-        background: #333355;
-
-        /* Prevent the badge from being accidentally selected as text */
+        background: #333355;            /* Placeholder until applyClientRole() fires */
         user-select: none;
     }
   </style>
 </head>
 <body>
 
-  <!-- NEWLY ADDED ──────────────────────────────────────────────────────────────
-       Role indicator badge.
-
-       This div starts empty — applyClientRole() in canvas.js populates it with
-       "⚙ Admin" or "⚔ Player" and sets the background color once the welcome
-       message arrives from the server.
-
-       It lives outside the canvas so it can be a real DOM element (searchable,
-       styleable, screenreader-accessible) rather than something painted onto
-       the canvas itself (which would need to be redrawn every frame).
-  ─────────────────────────────────────────────────────────────────────────── -->
+  <!-- Role indicator badge — populated by applyClientRole() in canvas.js -->
   <div id="role-indicator"></div>
 
-  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <!--
+    NEWLY ADDED ─────────────────────────────────────────────────────────────────
+    The canvas element no longer has hardcoded width/height attributes.
 
-  <!-- network.js must load first because canvas.js calls sendTokenPlace()
-       and reads clientID / clientRole, both of which are declared in network.js -->
+    Previously: <canvas id="gameCanvas" width="800" height="600">
+    Now:        <canvas id="gameCanvas">
+
+    Removing the attributes means the canvas starts at the browser's default
+    size (300×150px) until JavaScript sets the real dimensions. In practice
+    the canvas is invisible behind the setup/waiting overlay during this
+    window, so the default size is never visible to the user.
+
+    The real dimensions are set by applyCanvasSize() in canvas.js, called
+    either when the admin confirms the setup modal or when a joining player
+    receives a "canvas_configured" message from the server.
+    ─────────────────────────────────────────────────────────────────────────────
+  -->
+  <canvas id="gameCanvas"></canvas>
+
+  <!--
+    network.js must load before canvas.js because canvas.js calls functions
+    that are declared in network.js (sendTokenPlace, sendCanvasSize, etc.)
+    and reads variables that network.js owns (clientID, clientRole).
+  -->
   <script src="network.js"></script>
   <script src="canvas.js"></script>
 </body>

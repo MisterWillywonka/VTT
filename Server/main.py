@@ -9,111 +9,100 @@ app = FastAPI()
 # Keeps track of all connected clients: { client_id: WebSocket }
 connected_clients: dict[str, WebSocket] = {}
 
-# NEWLY ADDED ─────────────────────────────────────────────────────────────────
-# Tracks metadata for each connected client, keyed by client_id.
-# Right now this only holds "role", but it's a dict so we can add more
-# fields later (e.g. display name, color preference) without restructuring.
-#
-# Structure: { client_id: { "role": "admin" | "player" } }
+# Tracks metadata (role) for each connected client
 client_info: dict[str, dict] = {}
-# ─────────────────────────────────────────────────────────────────────────────
 
-# NEWLY ADDED ─────────────────────────────────────────────────────────────────
-# Tracks which client_id currently holds the admin role.
-# None means no admin is assigned yet (e.g. server just started).
-# Only one client may be admin at a time.
+# Which client_id currently holds the admin role
 admin_id: str | None = None
-# ─────────────────────────────────────────────────────────────────────────────
 
 barriers: list = [{}]
 
 game_state = {
     "tokens": {},
-    "barriers": barriers
+    "barriers": barriers,
+
+    # NEWLY ADDED ─────────────────────────────────────────────────────────────
+    # Stores the admin-configured grid dimensions for the session.
+    #
+    # We store logical cell counts (cols, rows) rather than pixel dimensions.
+    # GRID_SIZE is a client-side rendering constant — the server only needs to
+    # know the grid shape, not how big each cell is drawn on screen.
+    #
+    # Starts as None so the server can detect whether setup has been completed.
+    # Clients that connect before the admin configures the canvas will receive
+    # None here and enter a "waiting" state until "canvas_configured" arrives.
+    #
+    # Once set, shape is: { "cols": int, "rows": int }
+    "canvas": None
+    # ─────────────────────────────────────────────────────────────────────────
 }
 
-# NEWLY ADDED ─────────────────────────────────────────────────────────────────
-def is_admin(client_id: str) -> bool:
-    """
-    Returns True if the given client is the current admin.
-    Centralising this check means if we ever change how admin status is
-    determined (e.g. a vote system), we only update it here.
-    """
-    return client_id == admin_id
-# ─────────────────────────────────────────────────────────────────────────────
 
-# NEWLY ADDED ─────────────────────────────────────────────────────────────────
+def is_admin(client_id: str) -> bool:
+    """Returns True if the given client currently holds the admin role."""
+    return client_id == admin_id
+
+
 def can_act_on_token(client_id: str, token_id: str) -> bool:
     """
-    Returns True if this client is allowed to move, edit, or delete
-    the given token.
-
-    Rules:
-      - Admin can act on ANY token regardless of ownership.
-      - Players can only act on tokens where their client_id appears
-        in the token's "owners" list.
-
-    Using an "owners" list (rather than a single owner_id string) is what
-    allows multiple players to share control of a token — e.g. a pet owned
-    by a specific player. Right now each token has exactly one owner, but
-    the data shape is already ready for multi-owner support.
+    Returns True if this client may move, edit, or delete the given token.
+    Admin can act on any token; players may only act on tokens they own.
     """
     if is_admin(client_id):
-        return True  # Admin has universal authority
-
+        return True
     token = game_state["tokens"].get(token_id)
     if not token:
-        return False  # Token doesn't exist — nothing to act on
-
-    # Check if the client is in the token's owners list
+        return False
     return client_id in token.get("owners", [])
-# ─────────────────────────────────────────────────────────────────────────────
+
+
+ROLE_PERMISSIONS: dict[str, list[str]] = {
+    "player": ["admin", "player"],
+    "pet":    ["admin", "player"],
+    "enemy":  ["admin"],
+    "npc":    ["admin"],
+}
 
 # NEWLY ADDED ─────────────────────────────────────────────────────────────────
-# Maps each token role to which client roles are allowed to create it.
-# Keeping this as a data structure (rather than scattered if/else blocks)
-# means adding a new token role in the future only requires one line here.
-ROLE_PERMISSIONS: dict[str, list[str]] = {
-    "player": ["admin", "player"],  # Both admin and players can create player tokens
-    "pet":    ["admin", "player"],  # Both can create pets
-    "enemy":  ["admin"],            # Admin only
-    "npc":    ["admin"],            # Admin only
-}
+# Hard limits on canvas dimensions the admin is allowed to configure.
+# These prevent absurdly small or enormous grids that would break rendering
+# or cause performance problems on client machines.
+#
+# 5×5 is the practical minimum for any meaningful play.
+# 100×100 at 40px/cell = 4000×4000px, which is large but manageable.
+CANVAS_MIN_COLS = 5
+CANVAS_MAX_COLS = 100
+CANVAS_MIN_ROWS = 5
+CANVAS_MAX_ROWS = 100
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global admin_id  # We may assign or reassign admin_id inside this function
+    global admin_id
 
     await websocket.accept()
     client_id = str(uuid.uuid4())
     connected_clients[client_id] = websocket
 
-    # NEWLY ADDED ─────────────────────────────────────────────────────────────
-    # Determine this client's role the moment they connect.
-    # The very first client to connect becomes admin; every client after is a player.
-    # admin_id starts as None (set at module level), so the first connection
-    # will always pass the `is None` check.
+    # Assign role on connect — first client becomes admin
     if admin_id is None:
         admin_id = client_id
         client_role = "admin"
     else:
         client_role = "player"
 
-    # Record this client's metadata in our lookup dict
     client_info[client_id] = {"role": client_role}
-    # ─────────────────────────────────────────────────────────────────────────
 
-    # Send the new client the current game state.
-    # NEWLY ADDED: we now also include client_role and admin_id so the client
-    # knows its own role immediately without needing a second round-trip.
+    # Send the full game state including the canvas config (which may be None
+    # if the admin hasn't configured it yet). Clients use state.canvas to decide
+    # whether to show the setup modal, waiting screen, or proceed normally.
     await websocket.send_text(json.dumps({
         "type": "welcome",
         "state": game_state,
         "client_id": client_id,
-        "client_role": client_role,   # NEWLY ADDED — "admin" or "player"
-        "admin_id": admin_id          # NEWLY ADDED — useful for UI indicators
+        "client_role": client_role,
+        "admin_id": admin_id
     }))
 
     try:
@@ -121,26 +110,80 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             msg = json.loads(data)
 
-            # ── Move token ────────────────────────────────────────────────────
-            if msg["type"] == "move_token":
+            # NEWLY ADDED ─────────────────────────────────────────────────────
+            # Handle "set_canvas_size" — sent by the admin after they confirm
+            # the setup modal. This is the only message type that writes to
+            # game_state["canvas"].
+            if msg["type"] == "set_canvas_size":
+
+                # Only the admin may configure the canvas. Any other client
+                # sending this message is either buggy or malicious.
+                if not is_admin(client_id):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Only the admin may configure the canvas size."
+                    }))
+                    continue
+
+                # Read and coerce values to int. We do this explicitly because
+                # JSON numbers from the browser can arrive as floats (e.g. 20.0),
+                # and we want clean integer storage and comparison.
+                try:
+                    cols = int(msg["cols"])
+                    rows = int(msg["rows"])
+                except (KeyError, ValueError, TypeError):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "set_canvas_size requires integer 'cols' and 'rows' fields."
+                    }))
+                    continue
+
+                # Validate the values are within the allowed range.
+                if not (CANVAS_MIN_COLS <= cols <= CANVAS_MAX_COLS):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"cols must be between {CANVAS_MIN_COLS} and {CANVAS_MAX_COLS}."
+                    }))
+                    continue
+
+                if not (CANVAS_MIN_ROWS <= rows <= CANVAS_MAX_ROWS):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"rows must be between {CANVAS_MIN_ROWS} and {CANVAS_MAX_ROWS}."
+                    }))
+                    continue
+
+                # Commit the validated dimensions to game_state so that clients
+                # who join later will receive the correct size in their welcome
+                # message and skip the waiting screen entirely.
+                game_state["canvas"] = {"cols": cols, "rows": rows}
+
+                # Broadcast "canvas_configured" to ALL connected clients,
+                # including the admin sender.
+                #
+                # We include the admin in this broadcast deliberately: canvas.js
+                # uses a single applyCanvasSize() path that fires on this message,
+                # so the admin's own canvas is resized by the same code as
+                # everyone else's — no special-casing needed.
+                for cid, client in connected_clients.items():
+                    await client.send_text(json.dumps({
+                        "type": "canvas_configured",
+                        "cols": cols,
+                        "rows": rows
+                    }))
+            # ─────────────────────────────────────────────────────────────────
+
+            elif msg["type"] == "move_token":
                 token_id = msg["token_id"]
                 if token_id in game_state["tokens"]:
-
-                    # NEWLY ADDED ─────────────────────────────────────────────
-                    # Replaced the old single-owner check with can_act_on_token().
-                    # This means admin can move any token; players can only move
-                    # tokens they own.
                     if not can_act_on_token(client_id, token_id):
                         await websocket.send_text(json.dumps({
                             "type": "error",
                             "message": "You do not have permission to move this token."
                         }))
                         continue
-                    # ─────────────────────────────────────────────────────────
-
                     game_state["tokens"][token_id]["x"] = msg["x"]
                     game_state["tokens"][token_id]["y"] = msg["y"]
-
                     for cid, client in connected_clients.items():
                         if cid != client_id:
                             await client.send_text(json.dumps({
@@ -150,18 +193,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "y": msg["y"]
                             }))
 
-            # ── Place token ───────────────────────────────────────────────────
             elif msg["type"] == "place_token":
                 token_id = msg["token_id"]
-
-                # NEWLY ADDED ─────────────────────────────────────────────────
-                # Read the requested token role from the message.
-                # The client's creation modal will always send this field.
-                # We default to "player" as a safe fallback if it's somehow missing.
                 requested_role = msg.get("role", "player")
 
-                # Validate: check whether this client's role permits creating
-                # a token of the requested role, using the ROLE_PERMISSIONS table.
                 allowed_creators = ROLE_PERMISSIONS.get(requested_role, [])
                 if client_role not in allowed_creators:
                     await websocket.send_text(json.dumps({
@@ -169,30 +204,48 @@ async def websocket_endpoint(websocket: WebSocket):
                         "message": f"Your role '{client_role}' cannot create '{requested_role}' tokens."
                     }))
                     continue
+
+                # NEWLY ADDED ─────────────────────────────────────────────────
+                # Reject placement if the canvas isn't configured yet.
+                # This guards against a race condition where a client sends
+                # place_token before set_canvas_size has been processed.
+                if game_state["canvas"] is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Canvas has not been configured yet. Wait for the admin to set up the session."
+                    }))
+                    continue
+
+                # NEWLY ADDED ─────────────────────────────────────────────────
+                # Validate the token's position is within the configured grid.
+                # A well-behaved client won't send out-of-bounds coordinates,
+                # but a client with a stale or tampered canvas size might.
+                # We reject rather than clamp so the client knows to retry
+                # after it has received the latest canvas_configured broadcast.
+                token_x = msg["x"]
+                token_y = msg["y"]
+                canvas_cols = game_state["canvas"]["cols"]
+                canvas_rows = game_state["canvas"]["rows"]
+
+                if not (0 <= token_x < canvas_cols and 0 <= token_y < canvas_rows):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": (
+                            f"Token position ({token_x}, {token_y}) is outside the "
+                            f"canvas bounds ({canvas_cols} cols × {canvas_rows} rows)."
+                        )
+                    }))
+                    continue
                 # ─────────────────────────────────────────────────────────────
 
                 game_state["tokens"][token_id] = {
-                    "x": msg["x"],
-                    "y": msg["y"],
+                    "x": token_x,
+                    "y": token_y,
                     "color": msg.get("color", "#e94560"),
                     "label": msg.get("label", "?"),
-
-                    # NEWLY ADDED ─────────────────────────────────────────────
-                    # "role" is the token's gameplay role (player/pet/enemy/npc).
-                    # Stored on the token so all clients can render it correctly.
                     "role": requested_role,
-
-                    # NEWLY ADDED ─────────────────────────────────────────────
-                    # "owners" replaces the old single "owner_id" string.
-                    # It's a list so multiple clients can own one token in the
-                    # future (e.g. a shared mount, or a pet that a second player
-                    # is granted control of). For now it just contains the creator.
                     "owners": [client_id],
-
-                    # We keep owner_id as well for any legacy references that
-                    # haven't been updated to use can_act_on_token() yet.
                     "owner_id": client_id
-                    # ─────────────────────────────────────────────────────────
                 }
 
                 for cid, client in connected_clients.items():
@@ -204,19 +257,15 @@ async def websocket_endpoint(websocket: WebSocket):
                             "token": game_state["tokens"][token_id]
                         }))
 
-            # ── Update token ──────────────────────────────────────────────────
             elif msg["type"] == "update_token":
                 token_id = msg["token_id"]
                 if token_id in game_state["tokens"]:
-
-                    # NEWLY ADDED: replaced single owner check with can_act_on_token()
                     if not can_act_on_token(client_id, token_id):
                         await websocket.send_text(json.dumps({
                             "type": "error",
                             "message": "You do not have permission to edit this token."
                         }))
                         continue
-
                     game_state["tokens"][token_id]["label"] = msg["label"]
                     game_state["tokens"][token_id]["color"] = msg["color"]
                     for cid, client in connected_clients.items():
@@ -228,19 +277,15 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "color": msg["color"]
                             }))
 
-            # ── Delete token ──────────────────────────────────────────────────
             elif msg["type"] == "delete_token":
                 token_id = msg["token_id"]
                 if token_id in game_state["tokens"]:
-
-                    # NEWLY ADDED: replaced single owner check with can_act_on_token()
                     if not can_act_on_token(client_id, token_id):
                         await websocket.send_text(json.dumps({
                             "type": "error",
                             "message": "You do not have permission to delete this token."
                         }))
                         continue
-
                     del game_state["tokens"][token_id]
                     for cid, client in connected_clients.items():
                         if cid != client_id:
@@ -252,48 +297,33 @@ async def websocket_endpoint(websocket: WebSocket):
                     print("token not found in game_state at all")
 
     except WebSocketDisconnect:
-        # NEWLY ADDED ─────────────────────────────────────────────────────────
-        # Clean up client_info when a client disconnects, just as we remove
-        # them from connected_clients. Without this, stale entries accumulate.
         del client_info[client_id]
         del connected_clients[client_id]
 
-        # NEWLY ADDED ─────────────────────────────────────────────────────────
-        # If the disconnecting client was the admin, we need to either vacate
-        # the admin slot or promote a new admin.
-        #
-        # Strategy chosen here: promote the next connected client (if any)
-        # so the session doesn't lose admin authority. The promoted client
-        # receives a "role_change" broadcast so their UI updates immediately.
-        #
-        # Alternative: set admin_id = None and wait for a new connection.
-        # That's simpler but leaves all remaining players locked out of
-        # admin-only actions until someone new joins.
         if client_id == admin_id:
             if connected_clients:
-                # Pick the first remaining client as the new admin.
-                # dict preserves insertion order in Python 3.7+, so this is
-                # effectively "longest-connected remaining player".
                 new_admin_id = next(iter(connected_clients))
                 admin_id = new_admin_id
                 client_info[new_admin_id]["role"] = "admin"
-
-                # Notify ALL remaining clients about the role change.
-                # Every client needs to know who the new admin is so their
-                # local iOwnToken() / UI reflects the change.
                 for cid, client in connected_clients.items():
                     await client.send_text(json.dumps({
                         "type": "role_change",
-                        # The newly promoted client's id
                         "new_admin_id": new_admin_id,
-                        # True only for the promoted client — lets them update
-                        # their own clientRole variable without comparing IDs
                         "promoted": cid == new_admin_id
                     }))
             else:
-                # Nobody left — reset so the next joiner becomes admin cleanly
+                # NEWLY ADDED ─────────────────────────────────────────────────
+                # The last client has disconnected — reset both admin_id and the
+                # canvas config so the next admin starts with a clean slate.
+                #
+                # Without resetting game_state["canvas"], the next admin to
+                # connect would receive a pre-configured canvas in their welcome
+                # message and skip the setup modal entirely, silently inheriting
+                # the previous session's grid size even if it's wrong for the
+                # new map. Resetting to None forces the setup flow to run again.
                 admin_id = None
-        # ─────────────────────────────────────────────────────────────────────
+                game_state["canvas"] = None
+                # ─────────────────────────────────────────────────────────────
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
