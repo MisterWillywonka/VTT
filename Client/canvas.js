@@ -23,86 +23,77 @@ function loadState(state) {
 
 // ─── Drawing ───────────────────────────────────────────────
 
-function drawGrid() {
+function redraw() {
+    // Clear the whole canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = "#2a2a4a";
+
+    drawGrid();
+    drawTokens();
+}
+
+function drawGrid() {
+    ctx.strokeStyle = "#444466"; // Dark purple-grey grid lines
     ctx.lineWidth = 1;
 
-    for (let x = 0; x <= COLS; x++) {
+    // Draw vertical lines
+    for (let x = 0; x <= canvas.width; x += GRID_SIZE) {
         ctx.beginPath();
-        ctx.moveTo(x * GRID_SIZE, 0);
-        ctx.lineTo(x * GRID_SIZE, canvas.height);
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
         ctx.stroke();
     }
-    for (let y = 0; y <= ROWS; y++) {
+
+    // Draw horizontal lines
+    for (let y = 0; y <= canvas.height; y += GRID_SIZE) {
         ctx.beginPath();
-        ctx.moveTo(0, y * GRID_SIZE);
-        ctx.lineTo(canvas.width, y * GRID_SIZE);
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
         ctx.stroke();
     }
 }
 
-function drawToken(id, x, y) {
-    const px = x * GRID_SIZE + GRID_SIZE / 2;
-    const py = y * GRID_SIZE + GRID_SIZE / 2;
-    const radius = GRID_SIZE / 2 - 4;
+function drawTokens() {
+    for (const id in tokens) {
+        const token = tokens[id];
 
-    ctx.beginPath();
-    ctx.arc(px, py, radius, 0, Math.PI * 2);
-    ctx.fillStyle = "#e74c3c";
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 2;
-    ctx.stroke();
+        // Convert grid coordinates to pixel coordinates (top-left of cell)
+        const px = token.x * GRID_SIZE;
+        const py = token.y * GRID_SIZE;
+        const center = GRID_SIZE / 2;
 
-    // Label: first letter of the token id
-    ctx.fillStyle = "#fff";
-    ctx.font = "bold 14px sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText(id[0].toUpperCase(), px, py);
-}
+        // Draw a filled circle
+        ctx.beginPath();
+        ctx.arc(px + center, py + center, center - 4, 0, Math.PI * 2);
+        ctx.fillStyle = token.color || "#e94560";
+        ctx.fill();
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.stroke();
 
-function redraw() {
-    drawGrid();
-    for (const [id, pos] of Object.entries(tokens)) {
-        if (dragging && dragging === id) {
-            // Draw the dragged token at the cursor position
-            const radius = GRID_SIZE / 2 - 4;
-            ctx.beginPath();
-            ctx.arc(dragPixelX, dragPixelY, radius, 0, Math.PI * 2);
-            ctx.fillStyle = "#c0392b";
-            ctx.globalAlpha = 0.75;
-            ctx.fill();
-            ctx.globalAlpha = 1.0;
-            ctx.strokeStyle = "#fff";
-            ctx.lineWidth = 2;
-            ctx.stroke();
-            ctx.fillStyle = "#fff";
-            ctx.font = "bold 14px sans-serif";
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText(id[0].toUpperCase(), dragPixelX, dragPixelY);
-        } else {
-            drawToken(id, pos.x, pos.y);
-        }
+        // Draw the token label (character name initial, etc.)
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 14px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(token.label || "?", px + center, py + center);
     }
 }
 
 // ─── Token state functions (called by network.js) ──────────
 
-function placeToken(id, x, y) {
+function placeToken(id, x, y, clientID) {
     tokens[id] = { x, y };
+    tokens[id]["owner_id"] = clientID
+
     redraw();
 }
 
-function moveToken(id, x, y) {
-    if (tokens[id]) {
-        tokens[id] = { x, y };
-    } else {
-        tokens[id] = { x, y };
+function moveToken(tokenId, gridX, gridY) {
+    if (tokens[tokenId]) {
+        tokens[tokenId].x = gridX;  // only touch x and y
+        tokens[tokenId].y = gridY;
+        redraw();
     }
-    redraw();
 }
 
 // ─── Mouse interaction ─────────────────────────────────────
@@ -125,18 +116,27 @@ function getTokenAtPixel(px, py) {
     return null;
 }
 
+function iOwnToken(tokenId) {
+    return tokens[tokenId] && tokens[tokenId].owner_id === clientID;
+}
+
 canvas.addEventListener("mousedown", (e) => {
     const rect = canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
-    // Check if we clicked on an existing token
     for (const [id, pos] of Object.entries(tokens)) {
         const tokenPx = pos.x * GRID_SIZE + GRID_SIZE / 2;
         const tokenPy = pos.y * GRID_SIZE + GRID_SIZE / 2;
         const dist = Math.hypot(mouseX - tokenPx, mouseY - tokenPy);
 
         if (dist < GRID_SIZE / 2) {
+            console.log("token owner_id:", tokens[id].owner_id);
+            console.log("clientID:", clientID);
+            console.log("iOwnToken result:", iOwnToken(id));
+
+
+            if (!iOwnToken(id)) return;  // ← not your token, do nothing
             dragging = id;
             dragOffsetX = mouseX - tokenPx;
             dragOffsetY = mouseY - tokenPy;
@@ -145,52 +145,132 @@ canvas.addEventListener("mousedown", (e) => {
             return;
         }
     }
-
-//    // No token clicked — place a new one called "hero" for now
-//    const gridX = Math.floor(mouseX / GRID_SIZE);
-//    const gridY = Math.floor(mouseY / GRID_SIZE);
-//    placeToken("hero", gridX, gridY);
-//    sendTokenMove("hero", gridX, gridY);
 });
 
 canvas.addEventListener("mousemove", (e) => {
     if (!dragging) return;
     const rect = canvas.getBoundingClientRect();
-    dragPixelX = e.clientX - rect.left;
-    dragPixelY = e.clientY - rect.top;
+    const grid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
+
+    tokens[dragging].x = grid.x;
+    tokens[dragging].y = grid.y;
+
     redraw();
 });
 
 canvas.addEventListener("mouseup", (e) => {
     if (!dragging) return;
     const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    const grid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
+    sendTokenMove(dragging, grid.x, grid.y);
 
-    // Snap to grid on release
-    const gridX = Math.floor(mouseX / GRID_SIZE);
-    const gridY = Math.floor(mouseY / GRID_SIZE);
-
-    tokens[dragging] = { x: gridX, y: gridY };
-    sendTokenMove(dragging, gridX, gridY);
     dragging = null;
-    redraw();
 });
 
 // Right-click anywhere empty to spawn a new token
 canvas.addEventListener("contextmenu", (e) => {
-    e.preventDefault(); // Stop the browser's right-click menu
-
-    const rect = canvas.getBoundingClientRect();
-    const grid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
-    const id = "Hero_" + Date.now()
-
-    placeToken(id,grid.x,grid.y)
-
-    // Broadcast the new token to all players
-    sendTokenMove(id, grid.x, grid.y);
+    e.preventDefault();
+    if (!getTokenAtPixel(e.clientX, e.clientY)) {
+        const rect = canvas.getBoundingClientRect();
+        const grid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
+        const id = "Hero_" + Date.now();
+        placeToken(id, grid.x, grid.y, clientID);
+        sendTokenPlace(id, grid.x, grid.y);
+    } else {
+        const clickedToken = getTokenAtPixel(e.clientX, e.clientY);
+        if (iOwnToken(clickedToken)) {          // ← only show menu if owner
+            selectedToken = clickedToken;
+            showTokenMenu(selectedToken);
+        }
+    }
     redraw();
 });
 
+function showTokenMenu(tokenId) {
+    const token = tokens[tokenId];
+
+    // Remove any existing menu before creating a new one
+    const existing = document.getElementById("token-menu");
+    if (existing) existing.remove();
+
+    // Calculate screen position of the token
+    const rect = canvas.getBoundingClientRect();
+    const screenX = rect.left + (token.x * GRID_SIZE) + GRID_SIZE;
+    const screenY = rect.top  + (token.y * GRID_SIZE);
+
+    // Build the popup div
+    const menu = document.createElement("div");
+    menu.id = "token-menu";
+    menu.style.cssText = `
+        position: fixed;
+        left: ${screenX}px;
+        top: ${screenY}px;
+        background: #1a1a2e;
+        border: 1px solid #444466;
+        border-radius: 6px;
+        padding: 10px;
+        z-index: 1000;
+        color: white;
+        font-family: sans-serif;
+        font-size: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 160px;
+    `;
+
+    menu.innerHTML = `
+        <strong style="margin-bottom:4px;">Edit Token</strong>
+        <label>Label
+            <input id="menu-label" type="text" value="${token.label}"
+                style="width:100%; margin-top:2px; background:#2a2a3e; color:white; border:1px solid #444466; border-radius:4px; padding:3px;">
+        </label>
+        <label>Color
+            <input id="menu-color" type="color" value="${token.color}"
+                style="width:100%; margin-top:2px; height:30px; cursor:pointer;">
+        </label>
+        <button id="menu-save"
+            style="margin-top:4px; padding:5px; background:#e94560; color:white; border:none; border-radius:4px; cursor:pointer;">
+            Save
+        </button>
+        <button id="menu-delete"
+            style="padding:5px; background:#333; color:#e94560; border:1px solid #e94560; border-radius:4px; cursor:pointer;">
+            Delete Token
+        </button>
+    `;
+
+    document.body.appendChild(menu);
+
+    // Save button — update local state and broadcast changes
+    document.getElementById("menu-save").addEventListener("click", () => {
+        const newLabel = document.getElementById("menu-label").value.trim() || token.label;
+        const newColor = document.getElementById("menu-color").value;
+
+        tokens[tokenId].label = newLabel;
+        tokens[tokenId].color = newColor;
+
+        sendTokenUpdate(tokenId, newLabel, newColor);
+        menu.remove();
+        redraw();
+    });
+
+    // Delete button — remove locally and broadcast
+    document.getElementById("menu-delete").addEventListener("click", () => {
+        delete tokens[tokenId];
+        sendTokenDelete(tokenId);
+        menu.remove();
+        redraw();
+    });
+
+    // Clicking anywhere outside the menu closes it
+    setTimeout(() => {
+        document.addEventListener("click", function closeMenu(e) {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener("click", closeMenu);
+            }
+        });
+    }, 0);  // setTimeout prevents the click that opened the menu from immediately closing it
+}
 // ─── Initial draw ──────────────────────────────────────────
 redraw();
