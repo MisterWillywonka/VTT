@@ -4,45 +4,19 @@
   <title>My VTT</title>
   <style>
     body { margin: 0; background: #1a1a2e; }
+    canvas { display: block; cursor: crosshair; }
 
     /*
-     * NEWLY ADDED ─────────────────────────────────────────────────────────────
-     * The canvas no longer has hardcoded width/height attributes in HTML.
-     * Its pixel dimensions are set entirely by applyCanvasSize() in canvas.js
-     * once the admin configures the grid. Before that point the canvas is
-     * effectively 0×0 and invisible, which is the correct behaviour — the setup
-     * modal or waiting screen overlays the page during that window anyway.
-     *
-     * display: block prevents the default inline-element gap beneath the canvas.
-     * cursor: crosshair is kept as a clear visual signal that this is an
-     * interactive drawing surface.
-     * ─────────────────────────────────────────────────────────────────────────
-     */
-    canvas {
-        display: block;
-        cursor: crosshair;
-    }
-
-    /*
-     * NEWLY ADDED ─────────────────────────────────────────────────────────────
-     * Shared overlay base styles used by both the admin setup modal and the
-     * player waiting screen.
-     *
-     * Both overlays are full-viewport, sit above everything (z-index 3000),
-     * and use a dark semi-transparent backdrop. We define the shared properties
-     * here in CSS so the JavaScript only has to set the parts that differ
-     * (content, spinner vs. form, etc.).
-     *
-     * The overlays themselves are created and removed by canvas.js at runtime;
-     * this CSS is purely structural — it does not control visibility.
-     * ─────────────────────────────────────────────────────────────────────────
+     * Full-viewport overlay base styles shared by the setup modal and the
+     * player waiting screen. Both are injected into the DOM at runtime by
+     * canvas.js and removed when no longer needed.
      */
     #canvas-setup-overlay,
     #waiting-screen {
         position: fixed;
-        inset: 0;                       /* Covers the full viewport */
+        inset: 0;
         background: rgba(0, 0, 0, 0.82);
-        z-index: 3000;                  /* Above role indicator (2000) and token menus (1000) */
+        z-index: 3000;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -51,10 +25,18 @@
 
     /*
      * NEWLY ADDED ─────────────────────────────────────────────────────────────
-     * The centered card inside the setup overlay.
-     * canvas.js injects this as a child div of #canvas-setup-overlay.
-     * Defined here so it can be overridden with a media query if needed later
-     * (e.g. full-width on narrow mobile screens).
+     * The setup modal card is now wider and scrollable (Features 3, 4, 5).
+     *
+     * Why wider?
+     *   The original 380px card was sized for just cols/rows inputs. Adding the
+     *   background image upload section (Feature 4), the cell size input (Feature
+     *   5), and a thumbnail preview makes the card significantly taller and
+     *   benefits from a bit more horizontal breathing room.
+     *
+     * Why max-height + overflow-y?
+     *   On short screens (e.g. laptops with 768px height) the card could exceed
+     *   the viewport. overflow-y: auto gives the card an internal scrollbar
+     *   rather than letting it bleed off the bottom of the screen.
      * ─────────────────────────────────────────────────────────────────────────
      */
     #canvas-setup-overlay > div {
@@ -62,14 +44,16 @@
         border: 1px solid #444466;
         border-radius: 10px;
         padding: 28px 32px;
-        min-width: 300px;
-        max-width: 380px;
+        min-width: 320px;
+        max-width: 460px;       /* NEWLY ADDED: wider than the previous 380px */
+        max-height: 90vh;       /* NEWLY ADDED: prevents overflow on short screens */
+        overflow-y: auto;       /* NEWLY ADDED: internal scroll if card is tall */
         color: white;
     }
 
     /*
      * Role indicator badge — structural styles only.
-     * Background color is set dynamically by applyClientRole() in canvas.js.
+     * Background color is set by applyClientRole() in canvas.js.
      */
     #role-indicator {
         position: fixed;
@@ -83,39 +67,57 @@
         border-radius: 20px;
         z-index: 2000;
         border: 1px solid rgba(255, 255, 255, 0.2);
-        background: #333355;            /* Placeholder until applyClientRole() fires */
+        background: #333355;
         user-select: none;
+    }
+
+    /*
+     * NEWLY ADDED ─────────────────────────────────────────────────────────────
+     * Shared style for the dashed upload drop-zones used in the setup modal
+     * (background image) and the token creation/edit modals (portrait image).
+     *
+     * Defined here in CSS so the JS only has to inject the element id —
+     * the visual style is consistent across all three modals without
+     * duplicating the cssText in each innerHTML block.
+     * ─────────────────────────────────────────────────────────────────────────
+     */
+    .vtt-upload-zone {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 10px;
+        border: 2px dashed #444466;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        color: #9090aa;
+        gap: 8px;
+        transition: border-color 0.15s;
+    }
+    .vtt-upload-zone:hover {
+        border-color: #7c3aed;
+        color: #c4b5fd;
     }
   </style>
 </head>
 <body>
 
-  <!-- Role indicator badge — populated by applyClientRole() in canvas.js -->
+  <!-- Role indicator — populated by applyClientRole() in canvas.js -->
   <div id="role-indicator"></div>
 
   <!--
-    NEWLY ADDED ─────────────────────────────────────────────────────────────────
-    The canvas element no longer has hardcoded width/height attributes.
-
-    Previously: <canvas id="gameCanvas" width="800" height="600">
-    Now:        <canvas id="gameCanvas">
-
-    Removing the attributes means the canvas starts at the browser's default
-    size (300×150px) until JavaScript sets the real dimensions. In practice
-    the canvas is invisible behind the setup/waiting overlay during this
-    window, so the default size is never visible to the user.
-
-    The real dimensions are set by applyCanvasSize() in canvas.js, called
-    either when the admin confirms the setup modal or when a joining player
-    receives a "canvas_configured" message from the server.
-    ─────────────────────────────────────────────────────────────────────────────
+    The canvas has no hardcoded width/height attributes.
+    Pixel dimensions are set exclusively by applyCanvasSize() in canvas.js,
+    which is called after the admin configures the grid (or when a player joins
+    a session that is already configured). Before setup completes the canvas is
+    invisible behind the setup/waiting overlay.
   -->
   <canvas id="gameCanvas"></canvas>
 
   <!--
     network.js must load before canvas.js because canvas.js calls functions
-    that are declared in network.js (sendTokenPlace, sendCanvasSize, etc.)
-    and reads variables that network.js owns (clientID, clientRole).
+    declared in network.js (sendTokenPlace, sendCanvasSize, uploadImage, etc.)
+    and reads variables owned by network.js (clientID, clientRole, tokenImageCache).
   -->
   <script src="network.js"></script>
   <script src="canvas.js"></script>

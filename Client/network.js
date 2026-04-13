@@ -1,60 +1,39 @@
-// Open a WebSocket connection to the server
 const socket = new WebSocket("ws://localhost:8000/ws");
 
 socket.onopen = () => {
     console.log("Connected to VTT server!");
 };
 
-let clientID = null;
-
-// Stores this client's role: "admin" or "player".
-// Single source of truth — canvas.js reads this directly.
+let clientID   = null;
 let clientRole = null;
 
 socket.onmessage = (event) => {
     const msg = JSON.parse(event.data);
 
     if (msg.type === "welcome") {
-        clientID = msg.client_id;
+        clientID   = msg.client_id;
         clientRole = msg.client_role;
 
-        // NEWLY ADDED ─────────────────────────────────────────────────────────
-        // Before loading tokens or showing the canvas, we need to know whether
-        // the grid has been configured yet. msg.state.canvas is either null
-        // (not yet set) or an object like { cols: 20, rows: 15 }.
-        //
-        // Three cases:
-        //
-        //   A) Canvas is already configured (client joining a live session):
-        //      Apply the saved dimensions so the canvas is correctly sized
-        //      before we draw any tokens onto it, then load state normally.
-        //
-        //   B) Canvas is not configured AND we are the admin:
-        //      Show the setup modal so the admin can define the grid.
-        //      State loading is deferred — tokens (if any) will be drawn
-        //      by applyCanvasSize() → redraw() once the admin confirms.
-        //      We still call loadState() now so the token data is available
-        //      in memory; it just won't render until the canvas has a size.
-        //
-        //   C) Canvas is not configured AND we are a player:
-        //      Show the waiting screen. The "canvas_configured" handler below
-        //      will dismiss it and resize the canvas when the admin finishes.
-        //      We still call loadState() so tokens are in memory and ready.
-
         if (msg.state.canvas !== null) {
-            // Case A — session already has a configured canvas
-            applyCanvasSize(msg.state.canvas.cols, msg.state.canvas.rows);
+            // NEWLY ADDED ─────────────────────────────────────────────────────
+            // Pass grid_size as the third argument so the cell pixel size is
+            // applied correctly for clients joining a live session (Feature 5).
+            // Pass background_url to load the map background (Feature 4).
+            applyCanvasSize(
+                msg.state.canvas.cols,
+                msg.state.canvas.rows,
+                msg.state.canvas.grid_size       // NEWLY ADDED (Feature 5)
+            );
+            applyCanvasBackground(msg.state.canvas.background_url); // NEWLY ADDED (Feature 4)
+            // ─────────────────────────────────────────────────────────────────
             loadState(msg.state);
         } else if (clientRole === "admin") {
-            // Case B — admin must configure the canvas before play begins
-            loadState(msg.state);          // Load token data into memory
-            showCanvasSetupModal();        // Prompt the admin for grid dimensions
+            loadState(msg.state);
+            showCanvasSetupModal();
         } else {
-            // Case C — player arrived before admin configured the session
-            loadState(msg.state);          // Load token data into memory
-            showWaitingScreen();           // Block the UI until canvas is ready
+            loadState(msg.state);
+            showWaitingScreen();
         }
-        // ─────────────────────────────────────────────────────────────────────
 
         applyClientRole(clientRole);
         console.log(`Connected as ${clientRole} (id: ${clientID})`);
@@ -66,16 +45,58 @@ socket.onmessage = (event) => {
         moveToken(msg.token_id, msg.x, msg.y);
 
     } else if (msg.type === "token_placed") {
-        placeToken(msg.token_id, msg.token.x, msg.token.y, msg.owner_id, msg.token.role);
+        // NEWLY ADDED ─────────────────────────────────────────────────────────
+        // Pass the three new token fields to placeToken() so that tokens placed
+        // by remote clients render at the correct size, show their portrait
+        // image, and display any pre-existing statuses immediately.
+        placeToken(
+            msg.token_id,
+            msg.token.x,
+            msg.token.y,
+            msg.owner_id,
+            msg.token.role,
+            msg.token.size,       // NEWLY ADDED (Feature 1) — cell footprint
+            msg.token.statuses,   // NEWLY ADDED (Feature 2) — status list
+            msg.token.image_url   // NEWLY ADDED (Feature 3) — portrait URL
+        );
+        // ─────────────────────────────────────────────────────────────────────
 
     } else if (msg.type === "token_updated") {
         if (tokens[msg.token_id]) {
             tokens[msg.token_id].label = msg.label;
             tokens[msg.token_id].color = msg.color;
+
+            // NEWLY ADDED ─────────────────────────────────────────────────────
+            // Sync the three new fields whenever a token_updated message arrives.
+            // We use the nullish coalescing fallback so existing tokens that
+            // pre-date these fields don't lose their defaults.
+            tokens[msg.token_id].size      = msg.size      ?? 1;   // Feature 1
+            tokens[msg.token_id].statuses  = msg.statuses  ?? [];  // Feature 2
+
+            // NEWLY ADDED (Feature 3) ─────────────────────────────────────────
+            // If the image URL changed, invalidate the cache entry for the OLD
+            // URL so the image is re-fetched. The new URL will be cached by
+            // canvas.js on the next redraw when drawTokens() encounters it.
+            const oldUrl = tokens[msg.token_id].image_url;
+            const newUrl = msg.image_url ?? null;
+            if (oldUrl !== newUrl) {
+                tokenImageCache.delete(oldUrl); // no-op if oldUrl is null/missing
+            }
+            tokens[msg.token_id].image_url = newUrl;
+            // ─────────────────────────────────────────────────────────────────
+
             redraw();
         }
 
     } else if (msg.type === "token_deleted") {
+        // NEWLY ADDED (Feature 3) ─────────────────────────────────────────────
+        // When a token is deleted, also evict its image from the cache.
+        // This prevents the cache from growing unboundedly over a long session
+        // where many tokens are created and deleted.
+        if (tokens[msg.token_id] && tokens[msg.token_id].image_url) {
+            tokenImageCache.delete(tokens[msg.token_id].image_url);
+        }
+        // ─────────────────────────────────────────────────────────────────────
         delete tokens[msg.token_id];
         redraw();
 
@@ -88,93 +109,115 @@ socket.onmessage = (event) => {
             console.log(`Admin role transferred to: ${msg.new_admin_id}`);
         }
 
-    // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // Handle "canvas_configured" — broadcast by the server to ALL clients
-    // (admin included) once the admin submits the setup modal.
-    //
-    // This is the single code path that resizes every client's canvas.
-    // The admin receives this too — their setup modal calls sendCanvasSize()
-    // which triggers the server to broadcast back, so applyCanvasSize() is
-    // invoked here rather than directly in the modal confirm handler.
-    // This keeps resize logic in one place and avoids duplication.
     } else if (msg.type === "canvas_configured") {
-
-        // Resize the canvas element and update COLS/ROWS in canvas.js.
-        // After this call, canvasReady is true and all mouse interactions
-        // are unblocked.
-        applyCanvasSize(msg.cols, msg.rows);
-
-        // If this client was sitting on the waiting screen, dismiss it now
-        // that the canvas is ready. hideWaitingScreen() is a no-op if the
-        // waiting screen was never shown (e.g. for the admin).
+        // NEWLY ADDED ─────────────────────────────────────────────────────────
+        // Pass grid_size so all clients resize their cells at the same time
+        // the canvas dimensions change (Feature 5).
+        // Then load the background image (Feature 4).
+        applyCanvasSize(msg.cols, msg.rows, msg.grid_size); // NEWLY ADDED grid_size
+        applyCanvasBackground(msg.background_url);          // NEWLY ADDED (Feature 4)
+        // ─────────────────────────────────────────────────────────────────────
         hideWaitingScreen();
-
-        console.log(`Canvas configured: ${msg.cols} cols × ${msg.rows} rows`);
+        console.log(`Canvas configured: ${msg.cols}×${msg.rows} @ ${msg.grid_size}px/cell`);
     }
-    // ─────────────────────────────────────────────────────────────────────────
 };
 
 socket.onclose = () => {
-    socket.send(JSON.stringify({
-        type: "close_client",
-        client_id: clientID
-    }));
+    socket.send(JSON.stringify({ type: "close_client", client_id: clientID }));
 };
 
-// Helper to send a token move to the server
+// ─── Outbound message helpers ─────────────────────────────────────────────
+
 function sendTokenMove(tokenId, x, y) {
-    socket.send(JSON.stringify({
-        type: "move_token",
-        token_id: tokenId,
-        x: x,
-        y: y
-    }));
-}
-
-function sendTokenPlace(tokenId, x, y, role, label, color) {
-    socket.send(JSON.stringify({
-        type: "place_token",
-        token_id: tokenId,
-        x: x,
-        y: y,
-        owner: clientID,
-        role: role,
-        label: label,
-        color: color
-    }));
-}
-
-function sendTokenUpdate(tokenId, label, color) {
-    socket.send(JSON.stringify({
-        type: "update_token",
-        token_id: tokenId,
-        label: label,
-        color: color
-    }));
-}
-
-function sendTokenDelete(tokenId) {
-    socket.send(JSON.stringify({
-        type: "delete_token",
-        token_id: tokenId,
-    }));
+    socket.send(JSON.stringify({ type: "move_token", token_id: tokenId, x, y }));
 }
 
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// Sends the admin's chosen grid dimensions to the server.
-// Called by the confirm button inside showCanvasSetupModal() in canvas.js.
-//
-// The server will validate the values, write them to game_state["canvas"],
-// and then broadcast "canvas_configured" back to all clients — including the
-// admin. So the canvas resize on the admin's own screen is triggered by the
-// incoming "canvas_configured" message handler above, not directly here.
-// This means the admin's resize goes through exactly the same code path as
-// every other client's, with no special-casing.
-function sendCanvasSize(cols, rows) {
+// sendTokenPlace now carries size and imageUrl (Features 1 and 3).
+// statuses is always an empty array on creation — statuses are added via the
+// edit menu after the token is placed, not at creation time.
+function sendTokenPlace(tokenId, x, y, role, label, color, size, imageUrl) {
     socket.send(JSON.stringify({
-        type: "set_canvas_size",
-        cols: cols,
-        rows: rows
+        type:      "place_token",
+        token_id:  tokenId,
+        x, y,
+        owner:     clientID,
+        role,
+        label,
+        color,
+        size:      size     ?? 1,    // NEWLY ADDED (Feature 1)
+        statuses:  [],               // always empty at creation
+        image_url: imageUrl ?? null  // NEWLY ADDED (Feature 3)
     }));
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// sendTokenUpdate now carries size, statuses, and imageUrl (Features 1, 2, 3).
+// The edit menu in canvas.js collects all three before calling this function.
+function sendTokenUpdate(tokenId, label, color, size, statuses, imageUrl) {
+    socket.send(JSON.stringify({
+        type:      "update_token",
+        token_id:  tokenId,
+        label,
+        color,
+        size:      size     ?? 1,   // NEWLY ADDED (Feature 1)
+        statuses:  statuses ?? [],  // NEWLY ADDED (Feature 2)
+        image_url: imageUrl ?? null // NEWLY ADDED (Feature 3)
+    }));
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// sendCanvasSize now carries gridSize and backgroundUrl (Features 4 and 5).
+// Both come from the setup modal in canvas.js after the admin fills in the form.
+function sendCanvasSize(cols, rows, gridSize, backgroundUrl) {
+    socket.send(JSON.stringify({
+        type:           "set_canvas_size",
+        cols,
+        rows,
+        grid_size:      gridSize      ?? 40,  // NEWLY ADDED (Feature 5)
+        background_url: backgroundUrl ?? null // NEWLY ADDED (Feature 4)
+    }));
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+function sendTokenDelete(tokenId) {
+    socket.send(JSON.stringify({ type: "delete_token", token_id: tokenId }));
+}
+
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// uploadImage(file, endpoint) — shared HTTP upload helper (Features 3 and 4).
+//
+// Why HTTP POST instead of WebSocket?
+//   Binary image data is too large for WebSocket text frames. A 2 MB image as
+//   base64 in a JSON string balloons to ~2.7 MB of text and would block all
+//   other WebSocket traffic. A standard multipart HTTP upload runs in parallel
+//   to the WebSocket connection and is the right tool for binary blobs.
+//
+// Parameters:
+//   file     — the File object from a file <input> element's .files[0]
+//   endpoint — either "/upload/token-image" or "/upload/background-image"
+//
+// Returns: the parsed JSON response object from the server.
+//   For token images:     { url: string }
+//   For background images: { url: string, width_px: number|null, height_px: number|null }
+//
+// Throws if the network request fails or the server returns a non-2xx status.
+async function uploadImage(file, endpoint) {
+    // FormData automatically sets the correct Content-Type: multipart/form-data
+    // header including the boundary token — we must NOT set it manually.
+    const form = new FormData();
+    form.append("file", file);
+
+    const response = await fetch(endpoint, { method: "POST", body: form });
+
+    if (!response.ok) {
+        // Surface the server's error message so the UI can show it to the user.
+        const err = await response.json().catch(() => ({ error: "Upload failed." }));
+        throw new Error(err.error || `Upload failed with status ${response.status}`);
+    }
+
+    return response.json();
 }
 // ─────────────────────────────────────────────────────────────────────────────

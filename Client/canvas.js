@@ -1,130 +1,165 @@
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
 
-// The pixel size of each grid cell. This is a fixed rendering constant —
-// the admin configures how many cells exist, not how big each one is.
-const GRID_SIZE = 40;
-
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// COLS and ROWS are now `let` instead of `const` because they will be updated
-// by applyCanvasSize() when the admin configures the grid.
+// GRID_SIZE is now `let` instead of `const` (Feature 5).
+// It was previously a fixed constant (40px). Now the admin can choose any value
+// in the range 20–120 px per cell. applyCanvasSize() sets this variable when
+// the admin confirms the setup modal or when a client joins a live session.
 //
-// Previously these were computed once at load time from the hardcoded HTML
-// canvas dimensions. Now we initialise them to 0 and let applyCanvasSize()
-// set the real values. Having them as 0 is intentional: it makes any code
-// that accidentally uses them before setup produces obviously wrong results
-// rather than silently using stale numbers.
+// All coordinate math (drawGrid, drawTokens, pixelToGrid, hit detection) reads
+// GRID_SIZE at call time — no other changes are needed in those functions
+// because they already reference the variable rather than a literal.
+let GRID_SIZE = 40;   // default shown in setup modal; overwritten by applyCanvasSize()
+// ─────────────────────────────────────────────────────────────────────────────
+
 let COLS = 0;
 let ROWS = 0;
+let canvasReady = false;
+let tokens = {};
+let dragging = null;
+let selectedToken = null;
+
+const ROLE_RING_COLORS = {
+    player: "#4a9eff",
+    pet:    "#44cc88",
+    enemy:  "#e94560",
+    npc:    "#aaaaaa",
+};
+
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// Token image cache (Feature 3).
+//
+// Canvas redraws happen on every drag frame (mousemove), so we must never
+// create a new Image() inside drawTokens() — that would re-fetch the image
+// on every frame and cause constant network traffic and flickering.
+//
+// Instead we cache HTMLImageElement objects keyed by their URL. Once an image's
+// onload fires we call redraw() so the token renders with the portrait on the
+// very next frame. Until then drawTokens() falls back to the colored circle.
+//
+// The cache is a module-level Map so it persists across redraws and is shared
+// between placeToken() (where new tokens are registered) and drawTokens() (where
+// they are consumed). network.js evicts entries on token_updated and token_deleted.
+const tokenImageCache = new Map();   // url (string) → HTMLImageElement
 // ─────────────────────────────────────────────────────────────────────────────
 
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// canvasReady tracks whether the grid has been sized and is ready for
-// interaction. It starts false and is set to true inside applyCanvasSize().
+// Background image variable (Feature 4).
 //
-// Every mouse event handler checks this flag at the top and returns early
-// if it's false. This prevents players from dragging, right-clicking, or
-// placing tokens before the canvas dimensions are established — which would
-// produce incorrect grid coordinate calculations.
-let canvasReady = false;
+// Holds the loaded HTMLImageElement for the canvas background map, or null if
+// no background has been set. applyCanvasBackground() populates this.
+// redraw() draws it stretched to fill the full canvas before drawing the grid
+// and tokens on top.
+let backgroundImage = null;
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Local record of all tokens
-let tokens = {};
-
-// Which token is currently being dragged
-let dragging = null;
-let dragOffsetX = 0;
-let dragOffsetY = 0;
-let dragPixelX = 0;
-let dragPixelY = 0;
-
-// Which token the right-click context menu is currently operating on
-let selectedToken = null;
-
-// Maps token roles to their border ring colors on the canvas
-const ROLE_RING_COLORS = {
-    player:  "#4a9eff",  // Blue  — player characters
-    pet:     "#44cc88",  // Green — companion animals / familiars
-    enemy:   "#e94560",  // Red   — hostile creatures
-    npc:     "#aaaaaa",  // Gray  — neutral non-player characters
-};
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// Status indicator color palette (Feature 2).
+// Each status on a token gets a dot of the next color in this palette, cycling
+// by index. Using a fixed palette rather than hashing the status string keeps
+// adjacent statuses visually distinct while remaining deterministic.
+const STATUS_COLORS = ["#ff6b6b", "#ffd93d", "#6bcb77", "#4d96ff", "#c77dff", "#ff9f43"];
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── State loading ─────────────────────────────────────────
 
 function loadState(state) {
     tokens = state.tokens || {};
-
-    // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // If the welcome message includes a pre-configured canvas (i.e. a player
-    // is joining a session that's already running), apply the canvas size now
-    // before calling redraw(). Without this, tokens would be drawn onto a
-    // 0×0 canvas and be invisible.
-    //
-    // Note: when the admin is setting up a fresh session, state.canvas is null
-    // at this point — applyCanvasSize() will be called later when the admin
-    // confirms the setup modal and "canvas_configured" comes back from the server.
     if (state.canvas !== null && state.canvas !== undefined) {
-        applyCanvasSize(state.canvas.cols, state.canvas.rows);
+        // NEWLY ADDED: pass grid_size as third argument (Feature 5)
+        applyCanvasSize(state.canvas.cols, state.canvas.rows, state.canvas.grid_size);
+        // NEWLY ADDED: load background image if one exists (Feature 4)
+        applyCanvasBackground(state.canvas.background_url);
     }
-    // ─────────────────────────────────────────────────────────────────────────
-
     redraw();
 }
 
 // ─── Canvas sizing ─────────────────────────────────────────
 
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// applyCanvasSize() is the single function that physically resizes the canvas
-// element and updates the COLS/ROWS variables to match.
+// applyCanvasSize now accepts a third parameter: gridSize (Feature 5).
 //
-// It is called from three places:
-//   1. loadState()           — when a client joins a session already configured.
-//   2. network.js welcome    — same scenario, via loadState().
-//   3. network.js            — when "canvas_configured" is received by any client.
-//
-// Keeping all resize logic here means there is exactly one place to change if
-// we ever need to adjust how resizing works (e.g. adding a scroll container).
-//
-// Parameters:
-//   cols — number of grid columns (horizontal cell count)
-//   rows — number of grid rows    (vertical cell count)
-function applyCanvasSize(cols, rows) {
-    // Update the module-level variables so pixelToGrid(), drawGrid(), and
-    // drawTokens() all use the new dimensions automatically.
+// Setting GRID_SIZE here before computing canvas pixel dimensions means every
+// part of the codebase that reads GRID_SIZE (drawGrid, pixelToGrid, drawTokens,
+// hit detection, modal positioning) automatically uses the new cell size without
+// any further changes.
+function applyCanvasSize(cols, rows, gridSize) {
+    // NEWLY ADDED: update cell size if provided; fall back to current value
+    // so calls that omit the argument (e.g. legacy code paths) still work.
+    if (gridSize != null && !isNaN(gridSize)) {
+        GRID_SIZE = gridSize;   // NEWLY ADDED (Feature 5)
+    }
+
     COLS = cols;
     ROWS = rows;
-
-    // Set the canvas element's pixel dimensions.
-    // IMPORTANT: Setting canvas.width or canvas.height clears the canvas
-    // contents — this is expected behaviour, since we call redraw() immediately
-    // after to repaint everything at the new size.
+    // Pixel dimensions are now derived from GRID_SIZE, which may have just
+    // changed above. This is the only place where canvas.width/height are set.
     canvas.width  = cols * GRID_SIZE;
     canvas.height = rows * GRID_SIZE;
 
-    // Mark the canvas as ready so mouse event handlers are unblocked.
-    // This must happen before redraw() so that any synchronous code triggered
-    // by redraw doesn't immediately encounter a not-ready canvas.
     canvasReady = true;
-
-    // Repaint the grid and all tokens at the new canvas size.
     redraw();
+    console.log(`Canvas: ${cols}×${rows} cells @ ${GRID_SIZE}px = ${canvas.width}×${canvas.height}px`);
+}
 
-    console.log(`Canvas resized to ${cols} cols × ${rows} rows (${canvas.width}×${canvas.height}px)`);
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// applyCanvasBackground(url) — load and store the background map image (Feature 4).
+//
+// Called from three places:
+//   1. loadState()           — client joins a session that already has a background.
+//   2. network.js welcome    — same scenario (calls loadState which calls this).
+//   3. network.js            — "canvas_configured" received (admin + all players).
+//
+// Design notes:
+//   - Image loading is asynchronous. We start the load and immediately return.
+//     redraw() is called synchronously first (showing grid/tokens on a plain
+//     background), then called again from onload (painting the background under them).
+//     This two-step render avoids any visible delay — the grid is interactive
+//     immediately, and the background appears as soon as it has loaded.
+//   - Setting backgroundImage = null for a null URL clears any previous background
+//     cleanly so the canvas reverts to the plain dark colour.
+function applyCanvasBackground(url) {
+    if (!url) {
+        // No background — clear any previously loaded image and repaint.
+        backgroundImage = null;
+        redraw();
+        return;
+    }
+
+    const img = new Image();
+
+    img.onload = () => {
+        // Store the loaded image and trigger a repaint so it appears immediately.
+        backgroundImage = img;
+        redraw();
+    };
+
+    img.onerror = () => {
+        // If the image fails to load (e.g. file was deleted), treat it as
+        // "no background" so the session is still usable.
+        console.warn(`Failed to load background image: ${url}`);
+        backgroundImage = null;
+        redraw();
+    };
+
+    // Setting src kicks off the HTTP fetch. The browser caches this automatically
+    // so reconnecting clients don't re-download the background image every time.
+    img.src = url;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Role indicator ────────────────────────────────────────
 
 function applyClientRole(role) {
-    const indicator = document.getElementById("role-indicator");
-    if (!indicator) return;
+    const el = document.getElementById("role-indicator");
+    if (!el) return;
     if (role === "admin") {
-        indicator.textContent = "⚙ Admin";
-        indicator.style.background = "#7c3aed";
+        el.textContent = "⚙ Admin";
+        el.style.background = "#7c3aed";
     } else {
-        indicator.textContent = "⚔ Player";
-        indicator.style.background = "#1d6fa5";
+        el.textContent = "⚔ Player";
+        el.style.background = "#1d6fa5";
     }
 }
 
@@ -132,6 +167,20 @@ function applyClientRole(role) {
 
 function redraw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // NEWLY ADDED ─────────────────────────────────────────────────────────────
+    // Draw the background image first, stretched to fill the entire canvas
+    // (Feature 4). The grid lines and tokens are drawn on top of it so the
+    // cell grid remains legible over the map image.
+    //
+    // We check img.complete to avoid drawing a partially-loaded image, which
+    // would produce a blank or corrupt render. Once onload fires and sets
+    // backgroundImage, this check passes and the image renders correctly.
+    if (backgroundImage && backgroundImage.complete) {
+        ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     drawGrid();
     drawTokens();
 }
@@ -139,8 +188,6 @@ function redraw() {
 function drawGrid() {
     ctx.strokeStyle = "#444466";
     ctx.lineWidth = 1;
-    // drawGrid() uses canvas.width and canvas.height directly, so it
-    // automatically adapts to whatever size applyCanvasSize() set.
     for (let x = 0; x <= canvas.width; x += GRID_SIZE) {
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
     }
@@ -152,26 +199,91 @@ function drawGrid() {
 function drawTokens() {
     for (const id in tokens) {
         const token = tokens[id];
+
+        // Top-left pixel of the token's grid position
         const px = token.x * GRID_SIZE;
         const py = token.y * GRID_SIZE;
-        const center = GRID_SIZE / 2;
 
-        ctx.beginPath();
-        ctx.arc(px + center, py + center, center - 4, 0, Math.PI * 2);
-        ctx.fillStyle = token.color || "#e94560";
-        ctx.fill();
+        // NEWLY ADDED ─────────────────────────────────────────────────────────
+        // Derive pixel dimensions from token.size (Feature 1).
+        // A size-N token spans N cells in both axes, so its pixel footprint is
+        // N * GRID_SIZE wide and tall. The circle is inscribed in that square,
+        // touching each edge with 4px of padding.
+        const tokenSize   = token.size || 1;              // cell count (1–5)
+        const tokenPixels = tokenSize * GRID_SIZE;        // full pixel footprint
+        const center      = tokenPixels / 2;              // center of footprint
+        const radius      = center - 4;                   // inscribed circle radius
+        // ─────────────────────────────────────────────────────────────────────
 
         const ringColor = ROLE_RING_COLORS[token.role] || "#ffffff";
-        ctx.strokeStyle = ringColor;
-        ctx.lineWidth = 3;
-        ctx.stroke();
 
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "bold 14px sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(token.label || "?", px + center, py + center);
+        // NEWLY ADDED ─────────────────────────────────────────────────────────
+        // Token portrait rendering (Feature 3).
+        //
+        // If a portrait URL is set and the image is in the cache and has loaded,
+        // draw it clipped to the token's circle. Otherwise fall back to the
+        // plain colored circle. The cache look-up is synchronous — if the entry
+        // doesn't exist yet we start loading it in the background and draw the
+        // fallback for this frame.
+        const cachedImg = token.image_url ? tokenImageCache.get(token.image_url) : null;
+        const imageReady = cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0;
 
+        if (token.image_url && !cachedImg) {
+            // Not yet in cache — start loading. Once onload fires, redraw()
+            // is called and the image will render on the next pass.
+            const img = new Image();
+            img.onload  = () => redraw();
+            img.onerror = () => tokenImageCache.delete(token.image_url); // evict bad entry
+            img.src = token.image_url;
+            // Store immediately (even before load completes) so parallel redraws
+            // don't create duplicate Image objects for the same URL.
+            tokenImageCache.set(token.image_url, img);
+        }
+
+        if (imageReady) {
+            // Draw portrait clipped to the token's inscribed circle.
+            // ctx.save/restore scopes the clip so it doesn't affect later draws.
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(px + center, py + center, radius, 0, Math.PI * 2);
+            ctx.clip();
+            // Draw the image filling the entire token footprint; the clip above
+            // masks it to a circle shape.
+            ctx.drawImage(cachedImg, px, py, tokenPixels, tokenPixels);
+            ctx.restore();
+
+            // Draw the role ring on top of the image so the role is always visible.
+            ctx.beginPath();
+            ctx.arc(px + center, py + center, radius, 0, Math.PI * 2);
+            ctx.strokeStyle = ringColor;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+        } else {
+            // Fallback: plain colored circle with ring and text label.
+            ctx.beginPath();
+            ctx.arc(px + center, py + center, radius, 0, Math.PI * 2);
+            ctx.fillStyle = token.color || "#e94560";
+            ctx.fill();
+            ctx.strokeStyle = ringColor;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Label text — only shown when there is no portrait image because
+            // an image already identifies the token visually.
+            ctx.fillStyle = "#ffffff";
+            // NEWLY ADDED: font size scales with token size so labels stay
+            // readable as the footprint grows (Feature 1).
+            const fontSize = Math.max(10, Math.min(20, Math.round(tokenPixels * 0.32)));
+            ctx.font = `bold ${fontSize}px sans-serif`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(token.label || "?", px + center, py + center);
+        }
+
+        // Role badge — always shown regardless of whether a portrait is present.
+        // NEWLY ADDED: position uses tokenPixels instead of GRID_SIZE so the
+        // badge stays in the bottom-right corner for multi-cell tokens (Feature 1).
         const roleInitials = { player: "P", pet: "T", enemy: "E", npc: "N" };
         const badge = roleInitials[token.role];
         if (badge) {
@@ -179,22 +291,87 @@ function drawTokens() {
             ctx.fillStyle = ringColor;
             ctx.textAlign = "right";
             ctx.textBaseline = "bottom";
-            ctx.fillText(badge, px + GRID_SIZE - 2, py + GRID_SIZE - 2);
+            ctx.fillText(badge, px + tokenPixels - 2, py + tokenPixels - 2); // NEWLY ADDED tokenPixels
         }
+
+        // NEWLY ADDED ─────────────────────────────────────────────────────────
+        // Status indicator dots (Feature 2).
+        //
+        // We draw a row of small filled circles just below the token's footprint.
+        // Each dot corresponds to one status. Up to 4 dots are shown; if there
+        // are more than 4 statuses a "+N" label is appended to signal overflow.
+        //
+        // Colors cycle through STATUS_COLORS by index so adjacent statuses are
+        // visually distinct even if the status names are long or similar.
+        if (token.statuses && token.statuses.length > 0) {
+            const MAX_DOTS = 4;          // maximum dots before the overflow label
+            const DOT_R    = Math.max(3, Math.min(6, Math.round(GRID_SIZE * 0.12))); // radius scales with cell
+            const SPACING  = DOT_R * 3;  // center-to-center gap between dots
+            const shown    = Math.min(token.statuses.length, MAX_DOTS);
+
+            // Center the dot row under the token footprint horizontally.
+            const totalWidth = shown * SPACING - (SPACING - DOT_R * 2);
+            const startX = px + tokenPixels / 2 - totalWidth / 2 + DOT_R;
+            // Place dots just below the bottom edge of the footprint.
+            const dotY = py + tokenPixels + DOT_R + 3;
+
+            for (let i = 0; i < shown; i++) {
+                ctx.beginPath();
+                ctx.arc(startX + i * SPACING, dotY, DOT_R, 0, Math.PI * 2);
+                ctx.fillStyle = STATUS_COLORS[i % STATUS_COLORS.length];
+                ctx.fill();
+            }
+
+            // If there are more statuses than we showed, render a compact "+N"
+            // count to the right of the last dot.
+            if (token.statuses.length > MAX_DOTS) {
+                ctx.fillStyle = "#aaaaaa";
+                ctx.font = `bold ${DOT_R * 1.8}px sans-serif`;
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                ctx.fillText(
+                    `+${token.statuses.length - MAX_DOTS}`,
+                    startX + shown * SPACING,
+                    dotY
+                );
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
     }
 }
 
 // ─── Token state functions ─────────────────────────────────
 
-function placeToken(id, x, y, ownerID, role) {
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// placeToken now accepts size, statuses, and imageUrl (Features 1, 2, 3).
+//
+// For the image: we pre-warm the tokenImageCache here so the portrait starts
+// loading in the background immediately when the token is created. By the time
+// the user looks at the token, the image will likely already be cached and ready
+// to draw without any visible loading delay.
+function placeToken(id, x, y, ownerID, role, size, statuses, imageUrl) {
     tokens[id] = {
         x,
         y,
-        owner_id: ownerID,
-        role: role || "player",
+        owner_id:  ownerID,
+        role:      role      || "player",
+        size:      size      || 1,    // NEWLY ADDED (Feature 1)
+        statuses:  statuses  || [],   // NEWLY ADDED (Feature 2)
+        image_url: imageUrl  || null, // NEWLY ADDED (Feature 3)
     };
+
+    // NEWLY ADDED (Feature 3): pre-warm the image cache if a URL was provided.
+    if (imageUrl && !tokenImageCache.has(imageUrl)) {
+        const img = new Image();
+        img.onload  = () => redraw();
+        img.onerror = () => tokenImageCache.delete(imageUrl);
+        img.src = imageUrl;
+        tokenImageCache.set(imageUrl, img);
+    }
+
     redraw();
 }
+// ─────────────────────────────────────────────────────────────────────────────
 
 function moveToken(tokenId, gridX, gridY) {
     if (tokens[tokenId]) {
@@ -207,19 +384,37 @@ function moveToken(tokenId, gridX, gridY) {
 // ─── Mouse interaction ─────────────────────────────────────
 
 function pixelToGrid(px, py) {
+    // GRID_SIZE is now variable — pixelToGrid() reads it at call time,
+    // so it automatically uses the correct cell size after applyCanvasSize().
     return {
         x: Math.floor(px / GRID_SIZE),
         y: Math.floor(py / GRID_SIZE)
     };
 }
 
+// NEWLY ADDED ─────────────────────────────────────────────────────────────────
+// getTokenAtPixel updated for multi-cell token footprints (Feature 1).
+//
+// Previously this only checked if the clicked cell matched token.x / token.y
+// exactly. A size-N token occupies cells (x, y) through (x+N-1, y+N-1), so we
+// must check whether the clicked cell falls anywhere inside that rectangle.
+//
+// Without this change, clicking anywhere on a large token except its top-left
+// cell would fail to select it — very confusing for dragons and boss creatures.
 function getTokenAtPixel(px, py) {
     const grid = pixelToGrid(px, py);
     for (const id in tokens) {
-        if (tokens[id].x === grid.x && tokens[id].y === grid.y) return id;
+        const t    = tokens[id];
+        const size = t.size || 1;
+        // Check if the clicked grid cell is inside the token's N×N footprint.
+        if (grid.x >= t.x && grid.x < t.x + size &&
+            grid.y >= t.y && grid.y < t.y + size) {
+            return id;
+        }
     }
     return null;
 }
+// ─────────────────────────────────────────────────────────────────────────────
 
 function iOwnToken(tokenId) {
     const token = tokens[tokenId];
@@ -231,70 +426,77 @@ function iOwnToken(tokenId) {
 }
 
 canvas.addEventListener("mousedown", (e) => {
-    // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // Ignore all mouse input until the canvas has been sized and is ready.
-    // Without this guard, a click before applyCanvasSize() runs would pass
-    // pixel coordinates through pixelToGrid() with GRID_SIZE=40 against a
-    // 0×0 canvas, producing nonsense grid positions.
     if (!canvasReady) return;
-    // ─────────────────────────────────────────────────────────────────────────
-
-    const rect = canvas.getBoundingClientRect();
+    const rect   = canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
     for (const [id, pos] of Object.entries(tokens)) {
-        const tokenPx = pos.x * GRID_SIZE + GRID_SIZE / 2;
-        const tokenPy = pos.y * GRID_SIZE + GRID_SIZE / 2;
-        const dist = Math.hypot(mouseX - tokenPx, mouseY - tokenPy);
+        const size        = pos.size || 1;
+        const tokenPixels = size * GRID_SIZE;
+        const tokenLeft   = pos.x * GRID_SIZE;
+        const tokenTop    = pos.y * GRID_SIZE;
 
-        if (dist < GRID_SIZE / 2) {
+        const hit = mouseX >= tokenLeft && mouseX < tokenLeft + tokenPixels &&
+                    mouseY >= tokenTop  && mouseY < tokenTop  + tokenPixels;
+
+        if (hit) {
             if (!iOwnToken(id)) return;
             dragging = id;
-            dragOffsetX = mouseX - tokenPx;
-            dragOffsetY = mouseY - tokenPy;
-            dragPixelX = mouseX;
-            dragPixelY = mouseY;
             return;
         }
     }
 });
 
 canvas.addEventListener("mousemove", (e) => {
-    // NEWLY ADDED: guard against pre-setup interaction
-    if (!canvasReady) return;
-
-    if (!dragging) return;
+    if (!canvasReady || !dragging) return;
     const rect = canvas.getBoundingClientRect();
-    const grid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
-    tokens[dragging].x = grid.x;
-    tokens[dragging].y = grid.y;
+
+    // Step 1: find the grid cell the cursor is currently inside.
+    // No pixel offset is subtracted here — the cursor position alone determines
+    // the cell, which gives consistent cell-level snapping from any grab point.
+    const cursorGrid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
+
+    // Step 2: compute the anchor offset for this token's size.
+    // The anchor is the center cell, or the upper-left of the 4 center cells
+    // for even sizes. Math.floor((size - 1) / 2) gives exactly this:
+    //   size 1 → 0   (only cell, no offset needed)
+    //   size 2 → 0   (upper-left of the 4 cells is the top-left)
+    //   size 3 → 1   (center cell is 1 from the top-left in each axis)
+    //   size 4 → 1   (upper-left of the 4 center cells is 1 from top-left)
+    //   size 5 → 2   (center cell is 2 from the top-left in each axis)
+    const size         = tokens[dragging].size || 1;
+    const anchorOffset = Math.floor((size - 1) / 2);
+
+    // Step 3: shift the token's top-left so the anchor cell sits under the cursor.
+    // Both axes get the same offset because the anchor is always symmetric.
+    // Clamped to 0 so the token cannot be dragged off the top or left edges.
+    tokens[dragging].x = Math.max(0, cursorGrid.x - anchorOffset);
+    tokens[dragging].y = Math.max(0, cursorGrid.y - anchorOffset);
+
     redraw();
 });
 
 canvas.addEventListener("mouseup", (e) => {
-    // NEWLY ADDED: guard against pre-setup interaction
-    if (!canvasReady) return;
-
-    if (!dragging) return;
+    if (!canvasReady || !dragging) return;
     const rect = canvas.getBoundingClientRect();
-    const grid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
-    sendTokenMove(dragging, grid.x, grid.y);
+
+    const cursorGrid   = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
+    const size         = tokens[dragging].size || 1;
+    const anchorOffset = Math.floor((size - 1) / 2);
+
+    const gridX = Math.max(0, cursorGrid.x - anchorOffset);
+    const gridY = Math.max(0, cursorGrid.y - anchorOffset);
+
+    sendTokenMove(dragging, gridX, gridY);
     dragging = null;
 });
 
 canvas.addEventListener("contextmenu", (e) => {
     e.preventDefault();
-
-    // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // Suppress right-click interaction until the canvas is configured.
-    // This prevents the token creation modal from opening before the grid
-    // exists — which would produce a token at valid-looking but meaningless
-    // coordinates that the server would then reject.
     if (!canvasReady) return;
-    // ─────────────────────────────────────────────────────────────────────────
 
-    const rect = canvas.getBoundingClientRect();
+    const rect   = canvas.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
 
@@ -313,224 +515,234 @@ canvas.addEventListener("contextmenu", (e) => {
 
 // ─── Canvas setup modal ────────────────────────────────────
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// showCanvasSetupModal() presents a fullscreen overlay to the admin when they
-// connect to a session that hasn't been configured yet.
-//
-// Unlike the token creation/edit popups (which are small popups anchored near
-// a grid cell), this is a session-level setup step so it uses a full-page
-// overlay to make clear that configuration is required before play can begin.
-//
-// Key design decisions:
-//   - The modal is NOT dismissible by clicking outside or pressing Escape.
-//     The admin MUST make a choice — there is no meaningful default grid size
-//     that would suit every campaign map.
-//   - A live pixel-size preview updates as the admin changes the inputs,
-//     so they can see how large the canvas will be before committing.
-//   - On confirm, sendCanvasSize() tells the server, which broadcasts
-//     "canvas_configured" back to all clients. applyCanvasSize() is then
-//     called from the network.js message handler — not directly here — so
-//     the admin's own resize goes through the same code path as everyone else.
 function showCanvasSetupModal() {
-    // Remove any leftover overlay (shouldn't normally exist, but be safe)
     const existing = document.getElementById("canvas-setup-overlay");
     if (existing) existing.remove();
 
-    // ── Build the fullscreen overlay ──────────────────────────────────────────
     const overlay = document.createElement("div");
     overlay.id = "canvas-setup-overlay";
-
-    // The overlay covers the entire viewport and sits above everything else.
-    // z-index 3000 puts it above the role indicator (2000) and token menus (1000).
     overlay.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.82);
-        z-index: 3000;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: sans-serif;
+        position:fixed; inset:0; background:rgba(0,0,0,0.82); z-index:3000;
+        display:flex; align-items:center; justify-content:center; font-family:sans-serif;
     `;
 
-    // ── Build the centered card inside the overlay ────────────────────────────
     const card = document.createElement("div");
     card.style.cssText = `
-        background: #1a1a2e;
-        border: 1px solid #444466;
-        border-radius: 10px;
-        padding: 28px 32px;
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        min-width: 300px;
-        max-width: 380px;
-        color: white;
+        background:#1a1a2e; border:1px solid #444466; border-radius:10px;
+        padding:28px 32px; display:flex; flex-direction:column; gap:16px;
+        min-width:320px; max-width:460px; color:white; max-height:90vh; overflow-y:auto;
     `;
 
-    // Sensible defaults: 20 cols × 15 rows = 800×600px at 40px/cell,
-    // matching the old hardcoded canvas size so the change feels familiar.
-    const DEFAULT_COLS = 20;
-    const DEFAULT_ROWS = 15;
+    const DEFAULT_COLS      = 20;
+    const DEFAULT_ROWS      = 15;
+    const DEFAULT_GRID_SIZE = 40;
 
     card.innerHTML = `
         <div>
             <strong style="font-size:17px;">Configure the Battle Map</strong>
-            <p style="margin:6px 0 0; font-size:13px; color:#9090aa;">
-                Set the grid size for this session. All players will share
-                this canvas. You cannot change it after the session starts.
+            <p style="margin:6px 0 0;font-size:13px;color:#9090aa;">
+                All players share this canvas. Settings cannot be changed after the session starts.
             </p>
         </div>
 
-        <label style="display:flex; flex-direction:column; gap:4px; font-size:14px;">
-            Columns (width)
-            <input id="setup-cols" type="number"
-                   min="5" max="100" value="${DEFAULT_COLS}"
-                   style="padding:6px; background:#2a2a3e; color:white;
-                          border:1px solid #444466; border-radius:4px; font-size:14px;">
+        <!-- NEWLY ADDED (Feature 4) ─────────────────────────────────────────────
+             Background image upload section.
+             When the admin picks an image file:
+               1. It uploads via /upload/background-image.
+               2. The response provides width_px/height_px.
+               3. cols and rows inputs are auto-populated from those dimensions
+                  divided by the current grid_size.
+               4. A thumbnail preview is shown below the input.
+             All of this is handled by the JS below this innerHTML block. -->
+        <div style="display:flex;flex-direction:column;gap:6px;">
+            <label style="font-size:14px;font-weight:bold;">Background Map Image (optional)</label>
+            <label id="bg-upload-label" style="
+                display:flex;align-items:center;justify-content:center;
+                padding:10px;border:2px dashed #444466;border-radius:6px;
+                cursor:pointer;font-size:13px;color:#9090aa;gap:8px;
+            ">
+                📂 Click to upload a map image
+                <input id="setup-bg-file" type="file" accept="image/jpeg,image/png,image/webp"
+                       style="display:none;">
+            </label>
+            <!-- Thumbnail shown after a successful upload -->
+            <img id="setup-bg-preview" style="display:none;max-height:100px;border-radius:4px;object-fit:contain;" />
+            <p id="setup-bg-status" style="margin:0;font-size:12px;color:#9090aa;"></p>
+        </div>
+
+        <!-- NEWLY ADDED (Feature 5): Cell size input above cols/rows so the
+             auto-populate from an image upload can use the current cell size. -->
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;">
+            Cell size (px per grid square)
+            <input id="setup-grid-size" type="number" min="20" max="120" step="5"
+                   value="${DEFAULT_GRID_SIZE}"
+                   style="padding:6px;background:#2a2a3e;color:white;
+                          border:1px solid #444466;border-radius:4px;font-size:14px;">
         </label>
 
-        <label style="display:flex; flex-direction:column; gap:4px; font-size:14px;">
-            Rows (height)
-            <input id="setup-rows" type="number"
-                   min="5" max="100" value="${DEFAULT_ROWS}"
-                   style="padding:6px; background:#2a2a3e; color:white;
-                          border:1px solid #444466; border-radius:4px; font-size:14px;">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;">
+            Columns (width in cells)
+            <input id="setup-cols" type="number" min="5" max="100" value="${DEFAULT_COLS}"
+                   style="padding:6px;background:#2a2a3e;color:white;
+                          border:1px solid #444466;border-radius:4px;font-size:14px;">
         </label>
 
-        <!-- Live pixel-size preview so the admin can see the resulting canvas
-             size in pixels before they commit. Updates on every input change. -->
-        <p id="setup-preview" style="margin:0; font-size:13px; color:#9090aa; text-align:center;">
-            Canvas will be ${DEFAULT_COLS * 40} × ${DEFAULT_ROWS * 40} px
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:14px;">
+            Rows (height in cells)
+            <input id="setup-rows" type="number" min="5" max="100" value="${DEFAULT_ROWS}"
+                   style="padding:6px;background:#2a2a3e;color:white;
+                          border:1px solid #444466;border-radius:4px;font-size:14px;">
+        </label>
+
+        <!-- Live preview of the resulting canvas pixel size -->
+        <p id="setup-preview" style="margin:0;font-size:13px;color:#9090aa;text-align:center;">
+            Canvas will be ${DEFAULT_COLS * DEFAULT_GRID_SIZE} × ${DEFAULT_ROWS * DEFAULT_GRID_SIZE} px
         </p>
 
         <button id="setup-confirm" style="
-            padding: 9px;
-            background: #7c3aed;
-            color: white;
-            border: none;
-            border-radius: 6px;
-            font-size: 15px;
-            font-weight: bold;
-            cursor: pointer;
+            padding:9px;background:#7c3aed;color:white;border:none;
+            border-radius:6px;font-size:15px;font-weight:bold;cursor:pointer;
         ">Create Map</button>
     `;
 
     overlay.appendChild(card);
     document.body.appendChild(overlay);
 
-    // ── Live preview: update pixel dimensions as the admin types ──────────────
-    // We attach listeners to both inputs so the preview stays current whether
-    // the admin is typing, using the spinner arrows, or pasting a value.
-    const colsInput = document.getElementById("setup-cols");
-    const rowsInput = document.getElementById("setup-rows");
-    const preview   = document.getElementById("setup-preview");
+    // Wire up references to all the inputs
+    const colsInput     = document.getElementById("setup-cols");
+    const rowsInput     = document.getElementById("setup-rows");
+    const gridSizeInput = document.getElementById("setup-grid-size"); // NEWLY ADDED (Feature 5)
+    const preview       = document.getElementById("setup-preview");
+    const bgFileInput   = document.getElementById("setup-bg-file");  // NEWLY ADDED (Feature 4)
+    const bgPreview     = document.getElementById("setup-bg-preview");
+    const bgStatus      = document.getElementById("setup-bg-status");
 
+    // Draft background URL — set by the upload handler below and read on confirm.
+    let backgroundUrlDraft = null; // NEWLY ADDED (Feature 4)
+
+    // NEWLY ADDED ─────────────────────────────────────────────────────────────
+    // Live pixel-dimension preview. Now reads grid_size as well as cols/rows
+    // (Feature 5) so the preview is always accurate regardless of which input
+    // the admin changed last.
     function updatePreview() {
-        const c = parseInt(colsInput.value) || 0;
-        const r = parseInt(rowsInput.value) || 0;
-        preview.textContent = `Canvas will be ${c * GRID_SIZE} × ${r * GRID_SIZE} px`;
+        const c  = parseInt(colsInput.value)     || 0;
+        const r  = parseInt(rowsInput.value)     || 0;
+        const gs = parseInt(gridSizeInput.value) || GRID_SIZE;
+        preview.textContent = `Canvas will be ${c * gs} × ${r * gs} px`;
     }
 
     colsInput.addEventListener("input", updatePreview);
     rowsInput.addEventListener("input", updatePreview);
+    gridSizeInput.addEventListener("input", updatePreview); // NEWLY ADDED (Feature 5)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // NEWLY ADDED ─────────────────────────────────────────────────────────────
+    // Background image upload handler (Feature 4).
+    //
+    // When the admin picks a file:
+    //   1. Upload it immediately via uploadImage() (defined in network.js).
+    //   2. Store the returned URL in backgroundUrlDraft for use on confirm.
+    //   3. If the server returned image dimensions, auto-populate cols and rows
+    //      by dividing width_px / height_px by the current grid_size value.
+    //   4. Show a thumbnail preview so the admin can verify the image.
+    bgFileInput.addEventListener("change", async () => {
+        const file = bgFileInput.files[0];
+        if (!file) return;
+
+        bgStatus.textContent = "Uploading…";
+        bgStatus.style.color = "#9090aa";
+
+        try {
+            const result = await uploadImage(file, "/upload/background-image");
+            backgroundUrlDraft = result.url;
+
+            // Show thumbnail
+            bgPreview.src     = result.url;
+            bgPreview.style.display = "block";
+
+            // Auto-populate cols/rows from image dimensions if available.
+            // We read the current grid_size so the calculation uses whatever
+            // cell size the admin has selected (Feature 5 integration).
+            if (result.width_px && result.height_px) {
+                const gs = parseInt(gridSizeInput.value) || GRID_SIZE;
+                const suggestedCols = Math.max(5, Math.round(result.width_px  / gs));
+                const suggestedRows = Math.max(5, Math.round(result.height_px / gs));
+                // Clamp to the server's allowed range
+                colsInput.value = Math.min(suggestedCols, 100);
+                rowsInput.value = Math.min(suggestedRows, 100);
+                updatePreview();
+                bgStatus.textContent = `Uploaded. Columns and rows auto-set from image dimensions.`;
+            } else {
+                bgStatus.textContent = "Uploaded. Set columns and rows manually.";
+            }
+            bgStatus.style.color = "#6bcb77";
+
+        } catch (err) {
+            bgStatus.textContent = `Upload failed: ${err.message}`;
+            bgStatus.style.color = "#e94560";
+            backgroundUrlDraft = null;
+            bgPreview.style.display = "none";
+        }
+    });
+    // ─────────────────────────────────────────────────────────────────────────
 
     // ── Confirm button ────────────────────────────────────────────────────────
     document.getElementById("setup-confirm").addEventListener("click", () => {
-        const cols = parseInt(colsInput.value);
-        const rows = parseInt(rowsInput.value);
+        const cols     = parseInt(colsInput.value);
+        const rows     = parseInt(rowsInput.value);
+        const gridSize = parseInt(gridSizeInput.value); // NEWLY ADDED (Feature 5)
 
-        // Client-side validation mirrors the server's CANVAS_MIN/MAX constants.
-        // The server will also validate, but catching it here gives instant
-        // feedback without a network round-trip.
         if (isNaN(cols) || cols < 5 || cols > 100) {
-            alert("Columns must be a number between 5 and 100.");
-            return;
+            alert("Columns must be between 5 and 100."); return;
         }
         if (isNaN(rows) || rows < 5 || rows > 100) {
-            alert("Rows must be a number between 5 and 100.");
-            return;
+            alert("Rows must be between 5 and 100."); return;
+        }
+        // NEWLY ADDED (Feature 5): validate cell size
+        if (isNaN(gridSize) || gridSize < 20 || gridSize > 120) {
+            alert("Cell size must be between 20 and 120 px."); return;
         }
 
-        // Tell the server the chosen dimensions. The server will validate,
-        // store, and then broadcast "canvas_configured" back to all clients.
-        // When that message arrives in network.js, applyCanvasSize() is called
-        // for every client — including this admin — which actually resizes the
-        // canvas and sets canvasReady = true.
-        sendCanvasSize(cols, rows);
-
-        // Remove the overlay. The canvas isn't usable yet (canvasReady is still
-        // false) but will become so as soon as "canvas_configured" is received.
+        // Send all four values to the server.
+        // The server validates, stores, and broadcasts "canvas_configured" back
+        // to all clients. Each client's applyCanvasSize() + applyCanvasBackground()
+        // then runs from the network.js handler, not directly here, so the admin's
+        // own canvas resizes via the same code path as everyone else's.
+        sendCanvasSize(cols, rows, gridSize, backgroundUrlDraft); // NEWLY ADDED gridSize + backgroundUrlDraft
         overlay.remove();
     });
-
-    // Intentionally NO click-outside-to-close handler.
-    // The admin must explicitly confirm a grid size — there is no sensible
-    // default to fall back on if they accidentally dismiss the modal.
+    // No click-outside-to-close — the admin must explicitly confirm.
 }
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Waiting screen ────────────────────────────────────────
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// showWaitingScreen() is called for player clients who connect before the admin
-// has configured the canvas. It shows a fullscreen holding overlay that blocks
-// all canvas interaction until "canvas_configured" is received.
-//
-// hideWaitingScreen() dismisses it. It is always safe to call even if the
-// waiting screen was never shown (e.g. if called for the admin by mistake).
 function showWaitingScreen() {
-    // Don't stack duplicates
     const existing = document.getElementById("waiting-screen");
     if (existing) return;
-
     const overlay = document.createElement("div");
     overlay.id = "waiting-screen";
-
-    // Same stacking context as the setup modal — covers everything.
     overlay.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.82);
-        z-index: 3000;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        font-family: sans-serif;
-        color: white;
-        gap: 16px;
+        position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:3000;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        font-family:sans-serif;color:white;gap:16px;
     `;
-
     overlay.innerHTML = `
         <div style="font-size:36px;">🗺️</div>
         <strong style="font-size:18px;">Waiting for the admin...</strong>
-        <p style="margin:0; font-size:14px; color:#9090aa; text-align:center; max-width:280px;">
-            The admin is setting up the battle map.<br>
-            You'll be able to play as soon as they're done.
+        <p style="margin:0;font-size:14px;color:#9090aa;text-align:center;max-width:280px;">
+            The admin is setting up the battle map.<br>You'll be able to play as soon as they're done.
         </p>
-        <!-- Simple CSS spinner to show that something is actively happening -->
-        <div style="
-            width: 28px; height: 28px;
-            border: 3px solid #444466;
-            border-top-color: #7c3aed;
-            border-radius: 50%;
-            animation: vtt-spin 0.9s linear infinite;
-        "></div>
-        <style>
-            @keyframes vtt-spin { to { transform: rotate(360deg); } }
-        </style>
+        <div style="width:28px;height:28px;border:3px solid #444466;border-top-color:#7c3aed;
+                    border-radius:50%;animation:vtt-spin 0.9s linear infinite;"></div>
+        <style>@keyframes vtt-spin{to{transform:rotate(360deg);}}</style>
     `;
-
     document.body.appendChild(overlay);
 }
 
 function hideWaitingScreen() {
-    // Safe to call even if the waiting screen was never shown
     const overlay = document.getElementById("waiting-screen");
     if (overlay) overlay.remove();
 }
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Token creation modal ──────────────────────────────────
 
@@ -539,18 +751,18 @@ function showTokenCreationModal(gridX, gridY) {
     if (existing) existing.remove();
 
     const allRoles = [
-        ["player", "Player"],
-        ["pet",    "Pet"],
-        ["enemy",  "Enemy"],
-        ["npc",    "NPC"],
+        ["player","Player"],["pet","Pet"],["enemy","Enemy"],["npc","NPC"],
     ];
-    const playerRoles = ["player", "pet"];
+    const playerRoles = ["player","pet"];
     const availableRoles = (clientRole === "admin")
         ? allRoles
-        : allRoles.filter(([value]) => playerRoles.includes(value));
+        : allRoles.filter(([v]) => playerRoles.includes(v));
     const roleOptions = availableRoles
-        .map(([value, label]) => `<option value="${value}">${label}</option>`)
-        .join("");
+        .map(([v,l]) => `<option value="${v}">${l}</option>`).join("");
+
+    // NEWLY ADDED (Feature 1): size options for the dropdown.
+    const sizeOptions = [1,2,3,4,5]
+        .map(n => `<option value="${n}"${n===1?" selected":""}>${n}×${n}</option>`).join("");
 
     const canvasRect = canvas.getBoundingClientRect();
     const screenX = canvasRect.left + (gridX * GRID_SIZE) + GRID_SIZE;
@@ -559,52 +771,130 @@ function showTokenCreationModal(gridX, gridY) {
     const modal = document.createElement("div");
     modal.id = "token-creation-modal";
     modal.style.cssText = `
-        position: fixed; left: ${screenX}px; top: ${screenY}px;
-        background: #1a1a2e; border: 1px solid #444466; border-radius: 6px;
-        padding: 12px; z-index: 1000; color: white; font-family: sans-serif;
-        font-size: 14px; display: flex; flex-direction: column;
-        gap: 8px; min-width: 180px;
+        position:fixed;left:${screenX}px;top:${screenY}px;
+        background:#1a1a2e;border:1px solid #444466;border-radius:6px;
+        padding:12px;z-index:1000;color:white;font-family:sans-serif;
+        font-size:14px;display:flex;flex-direction:column;gap:8px;min-width:200px;
+        max-height:80vh;overflow-y:auto;
     `;
+
     modal.innerHTML = `
         <strong style="margin-bottom:2px;">New Token</strong>
+
         <label>Role
-            <select id="creation-role" style="width:100%; margin-top:2px; background:#2a2a3e; color:white; border:1px solid #444466; border-radius:4px; padding:3px;">
+            <select id="creation-role" style="width:100%;margin-top:2px;background:#2a2a3e;
+                color:white;border:1px solid #444466;border-radius:4px;padding:3px;">
                 ${roleOptions}
             </select>
         </label>
-        <label>Label
-            <input id="creation-label" type="text" placeholder="Name…" value=""
-                style="width:100%; margin-top:2px; background:#2a2a3e; color:white; border:1px solid #444466; border-radius:4px; padding:3px;">
+
+        <!-- NEWLY ADDED (Feature 1): size selector -->
+        <label>Size (cells)
+            <select id="creation-size" style="width:100%;margin-top:2px;background:#2a2a3e;
+                color:white;border:1px solid #444466;border-radius:4px;padding:3px;">
+                ${sizeOptions}
+            </select>
         </label>
+
+        <label>Label
+            <input id="creation-label" type="text" placeholder="Name…"
+                style="width:100%;margin-top:2px;background:#2a2a3e;color:white;
+                       border:1px solid #444466;border-radius:4px;padding:3px;">
+        </label>
+
         <label>Color
             <input id="creation-color" type="color" value="#e94560"
-                style="width:100%; margin-top:2px; height:28px; cursor:pointer;">
+                style="width:100%;margin-top:2px;height:28px;cursor:pointer;">
         </label>
-        <button id="creation-confirm" style="margin-top:4px; padding:5px; background:#e94560; color:white; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Place Token</button>
-        <button id="creation-cancel" style="padding:5px; background:#333; color:#aaa; border:1px solid #444466; border-radius:4px; cursor:pointer;">Cancel</button>
+
+        <!-- NEWLY ADDED (Feature 3): portrait image upload -->
+        <div style="display:flex;flex-direction:column;gap:4px;">
+            <span style="font-size:13px;">Portrait Image (optional)</span>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#9090aa;">
+                <input id="creation-image-file" type="file" accept="image/jpeg,image/png,image/webp"
+                       style="display:none;">
+                <span id="creation-image-btn" style="padding:4px 8px;background:#2a2a3e;
+                    border:1px solid #444466;border-radius:4px;">📂 Choose image</span>
+                <span id="creation-image-status"></span>
+            </label>
+            <img id="creation-image-preview" style="display:none;max-height:60px;border-radius:4px;object-fit:contain;" />
+        </div>
+
+        <button id="creation-confirm" style="margin-top:4px;padding:5px;background:#e94560;
+            color:white;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">
+            Place Token
+        </button>
+        <button id="creation-cancel" style="padding:5px;background:#333;color:#aaa;
+            border:1px solid #444466;border-radius:4px;cursor:pointer;">Cancel</button>
     `;
     document.body.appendChild(modal);
 
+    // NEWLY ADDED (Feature 3) ─────────────────────────────────────────────────
+    // Handle portrait image upload in the creation modal.
+    let imageUrlDraft = null;  // stores the URL returned by the server after upload
+
+    document.getElementById("creation-image-file").addEventListener("change", async () => {
+        const file = document.getElementById("creation-image-file").files[0];
+        if (!file) return;
+
+        const statusEl  = document.getElementById("creation-image-status");
+        const previewEl = document.getElementById("creation-image-preview");
+        const confirmEl = document.getElementById("creation-confirm");
+
+        statusEl.textContent  = "Uploading…";
+        statusEl.style.color  = "#9090aa";
+        confirmEl.disabled    = true; // prevent placement before upload completes
+
+        try {
+            const result  = await uploadImage(file, "/upload/token-image");
+            imageUrlDraft = result.url;
+            previewEl.src          = result.url;
+            previewEl.style.display = "block";
+            statusEl.textContent   = "✓";
+            statusEl.style.color   = "#6bcb77";
+        } catch (err) {
+            statusEl.textContent = `✗ ${err.message}`;
+            statusEl.style.color = "#e94560";
+            imageUrlDraft = null;
+        } finally {
+            confirmEl.disabled = false;
+        }
+    });
+    // ─────────────────────────────────────────────────────────────────────────
+
     document.getElementById("creation-confirm").addEventListener("click", () => {
         const role  = document.getElementById("creation-role").value;
+        const size  = parseInt(document.getElementById("creation-size").value) || 1; // NEWLY ADDED (Feature 1)
         const label = document.getElementById("creation-label").value.trim() || "?";
         const color = document.getElementById("creation-color").value;
+
         const tokenId = `${role}_${Date.now()}`;
 
+        // Store locally with all new fields so this client renders it immediately.
         tokens[tokenId] = {
             x: gridX, y: gridY,
             owner_id: clientID, owners: [clientID],
             role, label, color,
+            size:      size,           // NEWLY ADDED (Feature 1)
+            statuses:  [],             // NEWLY ADDED (Feature 2) — always empty on creation
+            image_url: imageUrlDraft,  // NEWLY ADDED (Feature 3)
         };
 
-        sendTokenPlace(tokenId, gridX, gridY, role, label, color);
+        // Pre-warm the image cache if an image was uploaded.
+        if (imageUrlDraft && !tokenImageCache.has(imageUrlDraft)) {
+            const img = new Image();
+            img.onload = () => redraw();
+            img.src    = imageUrlDraft;
+            tokenImageCache.set(imageUrlDraft, img);
+        }
+
+        // NEWLY ADDED: pass size and imageUrlDraft to sendTokenPlace (Features 1, 3)
+        sendTokenPlace(tokenId, gridX, gridY, role, label, color, size, imageUrlDraft);
         modal.remove();
         redraw();
     });
 
-    document.getElementById("creation-cancel").addEventListener("click", () => {
-        modal.remove();
-    });
+    document.getElementById("creation-cancel").addEventListener("click", () => modal.remove());
 
     setTimeout(() => {
         document.addEventListener("click", function closeModal(e) {
@@ -623,48 +913,252 @@ function showTokenMenu(tokenId) {
     const existing = document.getElementById("token-menu");
     if (existing) existing.remove();
 
-    const rect = canvas.getBoundingClientRect();
-    const screenX = rect.left + (token.x * GRID_SIZE) + GRID_SIZE;
+    const rect    = canvas.getBoundingClientRect();
+    const screenX = rect.left + (token.x * GRID_SIZE) + token.size * GRID_SIZE; // NEWLY ADDED: offset by full footprint width
     const screenY = rect.top  + (token.y * GRID_SIZE);
+
+    // NEWLY ADDED (Feature 2): initialise a local copy of statuses that the
+    // user can edit before hitting Save. We copy rather than reference so that
+    // cancelling the menu leaves the token's statuses unchanged.
+    let localStatuses = [...(token.statuses || [])];
 
     const menu = document.createElement("div");
     menu.id = "token-menu";
     menu.style.cssText = `
-        position: fixed; left: ${screenX}px; top: ${screenY}px;
-        background: #1a1a2e; border: 1px solid #444466; border-radius: 6px;
-        padding: 10px; z-index: 1000; color: white; font-family: sans-serif;
-        font-size: 14px; display: flex; flex-direction: column;
-        gap: 6px; min-width: 160px;
+        position:fixed;left:${screenX}px;top:${screenY}px;
+        background:#1a1a2e;border:1px solid #444466;border-radius:6px;
+        padding:10px;z-index:1000;color:white;font-family:sans-serif;
+        font-size:14px;display:flex;flex-direction:column;gap:6px;
+        min-width:200px;max-height:80vh;overflow-y:auto;
     `;
 
-    const roleDisplayNames = { player: "Player", pet: "Pet", enemy: "Enemy", npc: "NPC" };
-    const roleLabel = roleDisplayNames[token.role] || "Unknown";
-    const roleBadgeColor = ROLE_RING_COLORS[token.role] || "#ffffff";
+    const roleDisplayNames = { player:"Player", pet:"Pet", enemy:"Enemy", npc:"NPC" };
+    const roleLabel        = roleDisplayNames[token.role] || "Unknown";
+    const roleBadgeColor   = ROLE_RING_COLORS[token.role] || "#ffffff";
+
+    // NEWLY ADDED (Feature 1): size options with the token's current size pre-selected.
+    const sizeOptions = [1,2,3,4,5]
+        .map(n => `<option value="${n}"${n===(token.size||1)?" selected":""}>${n}×${n}</option>`)
+        .join("");
 
     menu.innerHTML = `
-        <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
             <strong>Edit Token</strong>
-            <span style="font-size:11px; padding:1px 6px; border-radius:10px; background:${roleBadgeColor}22; color:${roleBadgeColor}; border:1px solid ${roleBadgeColor};">${roleLabel}</span>
+            <span style="font-size:11px;padding:1px 6px;border-radius:10px;
+                background:${roleBadgeColor}22;color:${roleBadgeColor};
+                border:1px solid ${roleBadgeColor};">${roleLabel}</span>
         </div>
+
         <label>Label
             <input id="menu-label" type="text" value="${token.label}"
-                style="width:100%; margin-top:2px; background:#2a2a3e; color:white; border:1px solid #444466; border-radius:4px; padding:3px;">
+                style="width:100%;margin-top:2px;background:#2a2a3e;color:white;
+                       border:1px solid #444466;border-radius:4px;padding:3px;">
         </label>
+
         <label>Color
             <input id="menu-color" type="color" value="${token.color}"
-                style="width:100%; margin-top:2px; height:30px; cursor:pointer;">
+                style="width:100%;margin-top:2px;height:30px;cursor:pointer;">
         </label>
-        <button id="menu-save" style="margin-top:4px; padding:5px; background:#e94560; color:white; border:none; border-radius:4px; cursor:pointer;">Save</button>
-        <button id="menu-delete" style="padding:5px; background:#333; color:#e94560; border:1px solid #e94560; border-radius:4px; cursor:pointer;">Delete Token</button>
+
+        <!-- NEWLY ADDED (Feature 1): size selector, pre-filled with current size -->
+        <label>Size (cells)
+            <select id="menu-size" style="width:100%;margin-top:2px;background:#2a2a3e;
+                color:white;border:1px solid #444466;border-radius:4px;padding:3px;">
+                ${sizeOptions}
+            </select>
+        </label>
+
+        <!-- NEWLY ADDED (Feature 3): portrait image section -->
+        <div style="display:flex;flex-direction:column;gap:4px;">
+            <span style="font-size:13px;font-weight:bold;">Portrait Image</span>
+            ${token.image_url
+                ? `<img id="menu-image-preview" src="${token.image_url}"
+                        style="max-height:60px;border-radius:4px;object-fit:contain;">`
+                : `<span style="font-size:12px;color:#9090aa;">No image set.</span>`
+            }
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:#9090aa;">
+                <input id="menu-image-file" type="file" accept="image/jpeg,image/png,image/webp"
+                       style="display:none;">
+                <span style="padding:3px 7px;background:#2a2a3e;border:1px solid #444466;border-radius:4px;">
+                    📂 Replace image
+                </span>
+                <span id="menu-image-status"></span>
+            </label>
+        </div>
+
+        <!-- NEWLY ADDED (Feature 2): status management section -->
+        <div style="display:flex;flex-direction:column;gap:4px;">
+            <span style="font-size:13px;font-weight:bold;">Statuses</span>
+            <!-- The status list is rendered dynamically by renderStatusList() below -->
+            <div id="menu-status-list"></div>
+            <div style="display:flex;gap:4px;">
+                <input id="menu-status-input" type="text" placeholder="Add status…" maxlength="30"
+                    style="flex:1;background:#2a2a3e;color:white;border:1px solid #444466;
+                           border-radius:4px;padding:3px;font-size:13px;">
+                <button id="menu-status-add" style="padding:3px 8px;background:#2a2a3e;color:white;
+                    border:1px solid #444466;border-radius:4px;cursor:pointer;font-size:13px;">Add</button>
+            </div>
+        </div>
+
+        <button id="menu-save" style="margin-top:4px;padding:5px;background:#e94560;color:white;
+            border:none;border-radius:4px;cursor:pointer;">Save</button>
+        <button id="menu-delete" style="padding:5px;background:#333;color:#e94560;
+            border:1px solid #e94560;border-radius:4px;cursor:pointer;">Delete Token</button>
     `;
     document.body.appendChild(menu);
 
+    // NEWLY ADDED (Feature 3) ─────────────────────────────────────────────────
+    // Track the new image URL draft separately from the token's current URL so
+    // that cancelling leaves the token unchanged.
+    let imageUrlDraft = token.image_url || null;
+
+    document.getElementById("menu-image-file").addEventListener("change", async () => {
+        const file     = document.getElementById("menu-image-file").files[0];
+        const statusEl = document.getElementById("menu-image-status");
+        const saveBtn  = document.getElementById("menu-save");
+        if (!file) return;
+
+        statusEl.textContent = "Uploading…";
+        statusEl.style.color = "#9090aa";
+        saveBtn.disabled     = true;
+
+        try {
+            const result  = await uploadImage(file, "/upload/token-image");
+            imageUrlDraft = result.url;
+            // Update the preview if it exists; otherwise create one.
+            let preview = document.getElementById("menu-image-preview");
+            if (!preview) {
+                preview = document.createElement("img");
+                preview.id    = "menu-image-preview";
+                preview.style = "max-height:60px;border-radius:4px;object-fit:contain;";
+                statusEl.parentElement.insertBefore(preview, statusEl.parentElement.querySelector("label"));
+            }
+            preview.src    = result.url;
+            statusEl.textContent  = "✓ Uploaded";
+            statusEl.style.color  = "#6bcb77";
+        } catch (err) {
+            statusEl.textContent = `✗ ${err.message}`;
+            statusEl.style.color = "#e94560";
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
+
+    // "Remove image" button — only rendered when the token currently has an image.
+    const removeBtn = document.getElementById("menu-image-remove");
+    if (removeBtn) {
+        removeBtn.addEventListener("click", () => {
+            imageUrlDraft = null;
+            const preview = document.getElementById("menu-image-preview");
+            if (preview) preview.remove();
+            removeBtn.remove();
+            document.getElementById("menu-image-status").textContent = "Image removed.";
+        });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // NEWLY ADDED (Feature 2) ─────────────────────────────────────────────────
+    // renderStatusList() builds the current statuses as DOM nodes with × remove
+    // buttons. We call it on load and after every add/remove so the list always
+    // reflects localStatuses accurately.
+    //
+    // We use DOM creation rather than innerHTML here because each × button needs
+    // a closure over its specific index, and innerHTML would wipe event listeners.
+    function renderStatusList() {
+        const container = document.getElementById("menu-status-list");
+        container.innerHTML = "";  // clear and re-render
+
+        if (localStatuses.length === 0) {
+            container.innerHTML = `<span style="font-size:12px;color:#9090aa;">No statuses yet.</span>`;
+            return;
+        }
+
+        localStatuses.forEach((status, index) => {
+            const color = STATUS_COLORS[index % STATUS_COLORS.length];
+
+            const item = document.createElement("div");
+            item.style.cssText = `
+                display:flex;align-items:center;justify-content:space-between;
+                padding:2px 6px;margin-bottom:3px;border-radius:4px;
+                background:${color}22;border:1px solid ${color};font-size:12px;
+            `;
+
+            const label = document.createElement("span");
+            label.textContent  = status;
+            label.style.color  = color;
+
+            // × remove button — removes this specific status from localStatuses.
+            const removeBtn = document.createElement("button");
+            removeBtn.textContent  = "×";
+            removeBtn.style.cssText = `
+                background:none;border:none;color:${color};cursor:pointer;
+                font-size:14px;line-height:1;padding:0 0 0 6px;
+            `;
+            removeBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                // Remove by index so we handle duplicate status names correctly.
+                localStatuses.splice(index, 1);
+                renderStatusList(); // re-render after change
+            });
+
+            item.appendChild(label);
+            item.appendChild(removeBtn);
+            container.appendChild(item);
+        });
+    }
+
+    renderStatusList(); // initial render
+
+    // "Add" button and Enter-key shortcut for the status input.
+    function addStatus() {
+        const input  = document.getElementById("menu-status-input");
+        const value  = input.value.trim().slice(0, 30); // enforce 30-char limit
+        if (!value) return;
+        if (localStatuses.length >= 10) {
+            alert("A token can have at most 10 statuses.");
+            return;
+        }
+        if (!localStatuses.includes(value)) {
+            localStatuses.push(value);
+            renderStatusList();
+        }
+        input.value = "";
+        input.focus();
+    }
+
+    document.getElementById("menu-status-add").addEventListener("click", addStatus);
+    document.getElementById("menu-status-input").addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") { e.preventDefault(); addStatus(); }
+    });
+    // ─────────────────────────────────────────────────────────────────────────
+
     document.getElementById("menu-save").addEventListener("click", () => {
-        const newLabel = document.getElementById("menu-label").value.trim() || token.label;
-        const newColor = document.getElementById("menu-color").value;
-        tokens[tokenId].label = newLabel;
-        tokens[tokenId].color = newColor;
-        sendTokenUpdate(tokenId, newLabel, newColor);
+        const newLabel  = document.getElementById("menu-label").value.trim() || token.label;
+        const newColor  = document.getElementById("menu-color").value;
+        const newSize   = parseInt(document.getElementById("menu-size").value) || 1; // NEWLY ADDED (Feature 1)
+
+        // Update local token state immediately (optimistic update).
+        tokens[tokenId].label     = newLabel;
+        tokens[tokenId].color     = newColor;
+        tokens[tokenId].size      = newSize;       // NEWLY ADDED (Feature 1)
+        tokens[tokenId].statuses  = [...localStatuses]; // NEWLY ADDED (Feature 2)
+
+        // NEWLY ADDED (Feature 3): update image URL and invalidate cache if changed.
+        if (imageUrlDraft !== tokens[tokenId].image_url) {
+            tokenImageCache.delete(tokens[tokenId].image_url); // evict old entry
+            tokens[tokenId].image_url = imageUrlDraft;
+            // Pre-warm the cache for the new URL if it isn't already loaded.
+            if (imageUrlDraft && !tokenImageCache.has(imageUrlDraft)) {
+                const img = new Image();
+                img.onload = () => redraw();
+                img.src    = imageUrlDraft;
+                tokenImageCache.set(imageUrlDraft, img);
+            }
+        }
+
+        // Send all updated fields to the server in one message.
+        sendTokenUpdate(tokenId, newLabel, newColor, newSize, localStatuses, imageUrlDraft);
         menu.remove();
         redraw();
     });
@@ -687,6 +1181,4 @@ function showTokenMenu(tokenId) {
 }
 
 // ─── Initial draw ──────────────────────────────────────────
-// Canvas starts at 0×0 (no hardcoded HTML dimensions) so this produces an
-// empty frame. The real draw happens inside applyCanvasSize() → redraw().
 redraw();
