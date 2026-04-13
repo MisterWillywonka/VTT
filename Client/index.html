@@ -5,10 +5,62 @@
   <style>
     body { margin: 0; background: #1a1a2e; }
     canvas { display: block; cursor: crosshair; }
+
+    /* NEWLY ADDED ─────────────────────────────────────────────────────────────
+       Styles for the role indicator badge that appears in the top-right corner.
+
+       This is a non-interactive HUD element — it just tells the user whether
+       they are currently the admin or a player. The background color is set
+       dynamically by applyClientRole() in canvas.js so it changes if the user
+       gets promoted. We only set the invariant structural styles here.
+    ─────────────────────────────────────────────────────────────────────────── */
+    #role-indicator {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+
+        /* Text and sizing */
+        color: white;
+        font-family: sans-serif;
+        font-size: 13px;
+        font-weight: bold;
+        padding: 5px 12px;
+        border-radius: 20px;        /* Pill shape */
+
+        /* Keep it above the canvas and any token menus */
+        z-index: 2000;
+
+        /* Subtle border so it reads on both light and dark backgrounds */
+        border: 1px solid rgba(255, 255, 255, 0.2);
+
+        /* Placeholder background before applyClientRole() fires.
+           This avoids a flash of an unstyled element on load. */
+        background: #333355;
+
+        /* Prevent the badge from being accidentally selected as text */
+        user-select: none;
+    }
   </style>
 </head>
 <body>
+
+  <!-- NEWLY ADDED ──────────────────────────────────────────────────────────────
+       Role indicator badge.
+
+       This div starts empty — applyClientRole() in canvas.js populates it with
+       "⚙ Admin" or "⚔ Player" and sets the background color once the welcome
+       message arrives from the server.
+
+       It lives outside the canvas so it can be a real DOM element (searchable,
+       styleable, screenreader-accessible) rather than something painted onto
+       the canvas itself (which would need to be redrawn every frame).
+  ─────────────────────────────────────────────────────────────────────────── -->
+  <div id="role-indicator"></div>
+
   <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+  <!-- network.js must load first because canvas.js calls sendTokenPlace()
+       and reads clientID / clientRole, both of which are declared in network.js -->
   <script src="network.js"></script>
   <script src="canvas.js"></script>
 </body>
