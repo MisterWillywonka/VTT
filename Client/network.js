@@ -1,4 +1,4 @@
-const socket = new WebSocket("ws://localhost:8000/ws");
+const socket = new WebSocket("ws://67.6.47.30:8000/ws");
 
 socket.onopen = () => {
     console.log("Connected to VTT server!");

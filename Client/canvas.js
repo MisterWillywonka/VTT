@@ -19,6 +19,8 @@ let canvasReady = false;
 let tokens = {};
 let dragging = null;
 let selectedToken = null;
+let hoverTimer = null;
+let hoverTokenId = null;
 
 const ROLE_RING_COLORS = {
     player: "#4a9eff",
@@ -425,8 +427,20 @@ function iOwnToken(tokenId) {
         : token.owner_id === clientID;
 }
 
+// When the cursor leaves the canvas, cancel the pending hover timer and remove
+// any visible card. Without this, a card triggered near the canvas edge would
+// stay on screen indefinitely after the cursor has left.
+canvas.addEventListener("mouseleave", () => {
+    clearTimeout(hoverTimer);
+    hideHoverCard();
+    hoverTokenId = null;
+});
+
 canvas.addEventListener("mousedown", (e) => {
     if (!canvasReady) return;
+    clearTimeout(hoverTimer);
+    hideHoverCard();
+    hoverTokenId = null;
     const rect   = canvas.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
@@ -449,14 +463,47 @@ canvas.addEventListener("mousedown", (e) => {
 });
 
 canvas.addEventListener("mousemove", (e) => {
-    if (!canvasReady || !dragging) return;
-    const rect = canvas.getBoundingClientRect();
+    if (!canvasReady) return;  // split from the original — dragging check moved below
 
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // ── Hover card timer logic ────────────────────────────────────────────────
+    // Only runs when the user is NOT dragging. During a drag the cursor is
+    // semantically "on" the dragged token the whole time, so triggering a hover
+    // card would just get in the way.
+    if (!dragging) {
+        const hoveredId = getTokenAtPixel(mouseX, mouseY);
+
+        if (hoveredId !== hoverTokenId) {
+            // Cursor has moved to a different token (or off all tokens).
+            // Cancel any pending timer and hide any visible card before starting fresh.
+            clearTimeout(hoverTimer);
+            hideHoverCard();
+            hoverTokenId = hoveredId;
+
+            if (hoveredId) {
+                // Start a 1-second countdown. If the cursor stays still for the
+                // full second, the card appears. Any further mousemove cancels
+                // this timer before it fires.
+                hoverTimer = setTimeout(() => {
+                    showHoverCard(hoveredId, e.clientX, e.clientY);
+                }, 1000);
+            }
+        }
+        // If hoveredId === hoverTokenId the cursor is still over the same token —
+        // let the existing timer continue counting down undisturbed.
+
+        return;  // not dragging — nothing left to do
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Drag logic (user's version, unmodified) ───────────────────────────────
     // Step 1: find the grid cell the cursor is currently inside.
     // No pixel offset is subtracted here — the cursor position alone determines
     // the cell, which gives consistent cell-level snapping from any grab point.
     const cursorGrid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
-
     // Step 2: compute the anchor offset for this token's size.
     // The anchor is the center cell, or the upper-left of the 4 center cells
     // for even sizes. Math.floor((size - 1) / 2) gives exactly this:
@@ -467,13 +514,11 @@ canvas.addEventListener("mousemove", (e) => {
     //   size 5 → 2   (center cell is 2 from the top-left in each axis)
     const size         = tokens[dragging].size || 1;
     const anchorOffset = Math.floor((size - 1) / 2);
-
     // Step 3: shift the token's top-left so the anchor cell sits under the cursor.
     // Both axes get the same offset because the anchor is always symmetric.
     // Clamped to 0 so the token cannot be dragged off the top or left edges.
     tokens[dragging].x = Math.max(0, cursorGrid.x - anchorOffset);
     tokens[dragging].y = Math.max(0, cursorGrid.y - anchorOffset);
-
     redraw();
 });
 
@@ -512,6 +557,128 @@ canvas.addEventListener("contextmenu", (e) => {
     }
     redraw();
 });
+
+// ─── Token hover card ──────────────────────────────────────────────────────────
+
+// showHoverCard() builds a read-only popup displaying the token's portrait,
+// label, role, size, and statuses. It is shown after the cursor has rested on
+// a token for 1 second without moving. Any user — regardless of ownership —
+// can see this card; it is purely informational and has no buttons.
+//
+// screenX / screenY are viewport-relative pixel coordinates (from clientX/Y)
+// used to position the card near the cursor without converting to grid coords.
+function showHoverCard(tokenId, screenX, screenY) {
+    // Remove any existing card first — only one should exist at a time.
+    hideHoverCard();
+
+    const token = tokens[tokenId];
+    if (!token) return;
+
+    const roleDisplayNames = { player: "Player", pet: "Pet", enemy: "Enemy", npc: "NPC" };
+    const roleLabel        = roleDisplayNames[token.role] || "Unknown";
+    const roleBadgeColor   = ROLE_RING_COLORS[token.role] || "#ffffff";
+
+    // ── Build portrait HTML ───────────────────────────────────────────────────
+    // If the token has an image URL that is already in the cache and has loaded,
+    // show it. If the image is still loading or there is no URL, show nothing —
+    // we deliberately don't start a new load here because showHoverCard is called
+    // very frequently and placeToken() already pre-warms the cache on placement.
+    const cachedImg   = token.image_url ? tokenImageCache.get(token.image_url) : null;
+    const imageReady  = cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0;
+    const portraitHTML = imageReady
+        ? `<img src="${token.image_url}" style="
+               width:100%; max-height:120px; object-fit:cover;
+               border-radius:6px; margin-bottom:4px; display:block;">`
+        : "";  // no portrait section if image is absent or not yet loaded
+
+    // ── Build statuses HTML ───────────────────────────────────────────────────
+    // Each status is rendered as a small colored pill using the same STATUS_COLORS
+    // palette as the dots on the canvas, so the visual language is consistent.
+    const statusesHTML = (token.statuses && token.statuses.length > 0)
+        ? `<div style="margin-top:6px;">
+               <div style="font-size:11px;color:#9090aa;margin-bottom:4px;">Statuses</div>
+               <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                   ${token.statuses.map((s, i) => `
+                       <span style="
+                           font-size:11px; padding:2px 7px; border-radius:10px;
+                           background:${STATUS_COLORS[i % STATUS_COLORS.length]}22;
+                           color:${STATUS_COLORS[i % STATUS_COLORS.length]};
+                           border:1px solid ${STATUS_COLORS[i % STATUS_COLORS.length]};">
+                           ${s}
+                       </span>`).join("")}
+               </div>
+           </div>`
+        : `<div style="font-size:11px;color:#9090aa;margin-top:6px;">No statuses.</div>`;
+
+    // ── Build and position the card div ──────────────────────────────────────
+    const card = document.createElement("div");
+    card.id = "token-hover-card";
+
+    // Offset the card 14px to the right of the cursor so it doesn't obscure the
+    // token the user is looking at. We'll clamp it to the viewport after appending.
+    card.style.cssText = `
+        position: fixed;
+        left: ${screenX + 14}px;
+        top: ${screenY}px;
+        background: #1a1a2e;
+        border: 1px solid #444466;
+        border-radius: 8px;
+        padding: 10px 12px;
+        z-index: 1500;
+        color: white;
+        font-family: sans-serif;
+        font-size: 13px;
+        min-width: 140px;
+        max-width: 200px;
+        pointer-events: none;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    `;
+
+    // pointer-events: none means the card itself never intercepts mouse events,
+    // so the cursor remains "on the canvas" for the purpose of mousemove and
+    // mouseleave handlers. Without this, mousing over the card would trigger
+    // a canvas mouseleave and immediately hide the card.
+
+    card.innerHTML = `
+        ${portraitHTML}
+        <div style="font-weight:bold; font-size:14px; margin-bottom:4px;">
+            ${token.label || "?"}
+        </div>
+        <span style="
+            font-size:11px; padding:1px 6px; border-radius:10px;
+            background:${roleBadgeColor}22; color:${roleBadgeColor};
+            border:1px solid ${roleBadgeColor};">
+            ${roleLabel}
+        </span>
+        <span style="font-size:11px; color:#9090aa; margin-left:6px;">
+            ${(token.size || 1)}×${(token.size || 1)}
+        </span>
+        ${statusesHTML}
+    `;
+
+    document.body.appendChild(card);
+
+    // Clamp to viewport so the card doesn't bleed off the right or bottom edge.
+    // We do this after appending so offsetWidth/offsetHeight are available.
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cr = card.getBoundingClientRect();
+
+    if (cr.right > vw - 8) {
+        // Flip to the left of the cursor instead of the right.
+        card.style.left = `${screenX - cr.width - 14}px`;
+    }
+    if (cr.bottom > vh - 8) {
+        card.style.top = `${screenY - cr.height}px`;
+    }
+}
+
+// hideHoverCard() removes the card if it exists. Safe to call when no card
+// is present — the guard prevents any errors in that case.
+function hideHoverCard() {
+    const existing = document.getElementById("token-hover-card");
+    if (existing) existing.remove();
+}
 
 // ─── Canvas setup modal ────────────────────────────────────
 
