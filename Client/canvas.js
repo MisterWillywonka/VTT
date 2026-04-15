@@ -1,18 +1,7 @@
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// GRID_SIZE is now `let` instead of `const` (Feature 5).
-// It was previously a fixed constant (40px). Now the admin can choose any value
-// in the range 20–120 px per cell. applyCanvasSize() sets this variable when
-// the admin confirms the setup modal or when a client joins a live session.
-//
-// All coordinate math (drawGrid, drawTokens, pixelToGrid, hit detection) reads
-// GRID_SIZE at call time — no other changes are needed in those functions
-// because they already reference the variable rather than a literal.
-let GRID_SIZE = 40;   // default shown in setup modal; overwritten by applyCanvasSize()
-// ─────────────────────────────────────────────────────────────────────────────
-
+let GRID_SIZE = 40;
 let COLS = 0;
 let ROWS = 0;
 let canvasReady = false;
@@ -29,38 +18,10 @@ const ROLE_RING_COLORS = {
     npc:    "#aaaaaa",
 };
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// Token image cache (Feature 3).
-//
-// Canvas redraws happen on every drag frame (mousemove), so we must never
-// create a new Image() inside drawTokens() — that would re-fetch the image
-// on every frame and cause constant network traffic and flickering.
-//
-// Instead we cache HTMLImageElement objects keyed by their URL. Once an image's
-// onload fires we call redraw() so the token renders with the portrait on the
-// very next frame. Until then drawTokens() falls back to the colored circle.
-//
-// The cache is a module-level Map so it persists across redraws and is shared
-// between placeToken() (where new tokens are registered) and drawTokens() (where
-// they are consumed). network.js evicts entries on token_updated and token_deleted.
 const tokenImageCache = new Map();   // url (string) → HTMLImageElement
-// ─────────────────────────────────────────────────────────────────────────────
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// Background image variable (Feature 4).
-//
-// Holds the loaded HTMLImageElement for the canvas background map, or null if
-// no background has been set. applyCanvasBackground() populates this.
-// redraw() draws it stretched to fill the full canvas before drawing the grid
-// and tokens on top.
 let backgroundImage = null;
-// ─────────────────────────────────────────────────────────────────────────────
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// Status indicator color palette (Feature 2).
-// Each status on a token gets a dot of the next color in this palette, cycling
-// by index. Using a fixed palette rather than hashing the status string keeps
-// adjacent statuses visually distinct while remaining deterministic.
 const STATUS_COLORS = ["#ff6b6b", "#ffd93d", "#6bcb77", "#4d96ff", "#c77dff", "#ff9f43"];
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -77,26 +38,13 @@ function loadState(state) {
     redraw();
 }
 
-// ─── Canvas sizing ─────────────────────────────────────────
-
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// applyCanvasSize now accepts a third parameter: gridSize (Feature 5).
-//
-// Setting GRID_SIZE here before computing canvas pixel dimensions means every
-// part of the codebase that reads GRID_SIZE (drawGrid, pixelToGrid, drawTokens,
-// hit detection, modal positioning) automatically uses the new cell size without
-// any further changes.
 function applyCanvasSize(cols, rows, gridSize) {
-    // NEWLY ADDED: update cell size if provided; fall back to current value
-    // so calls that omit the argument (e.g. legacy code paths) still work.
     if (gridSize != null && !isNaN(gridSize)) {
         GRID_SIZE = gridSize;   // NEWLY ADDED (Feature 5)
     }
 
     COLS = cols;
     ROWS = rows;
-    // Pixel dimensions are now derived from GRID_SIZE, which may have just
-    // changed above. This is the only place where canvas.width/height are set.
     canvas.width  = cols * GRID_SIZE;
     canvas.height = rows * GRID_SIZE;
 
@@ -105,22 +53,7 @@ function applyCanvasSize(cols, rows, gridSize) {
     console.log(`Canvas: ${cols}×${rows} cells @ ${GRID_SIZE}px = ${canvas.width}×${canvas.height}px`);
 }
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// applyCanvasBackground(url) — load and store the background map image (Feature 4).
-//
-// Called from three places:
-//   1. loadState()           — client joins a session that already has a background.
-//   2. network.js welcome    — same scenario (calls loadState which calls this).
-//   3. network.js            — "canvas_configured" received (admin + all players).
-//
-// Design notes:
-//   - Image loading is asynchronous. We start the load and immediately return.
-//     redraw() is called synchronously first (showing grid/tokens on a plain
-//     background), then called again from onload (painting the background under them).
-//     This two-step render avoids any visible delay — the grid is interactive
-//     immediately, and the background appears as soon as it has loaded.
-//   - Setting backgroundImage = null for a null URL clears any previous background
-//     cleanly so the canvas reverts to the plain dark colour.
+
 function applyCanvasBackground(url) {
     if (!url) {
         // No background — clear any previously loaded image and repaint.
@@ -145,8 +78,6 @@ function applyCanvasBackground(url) {
         redraw();
     };
 
-    // Setting src kicks off the HTTP fetch. The browser caches this automatically
-    // so reconnecting clients don't re-download the background image every time.
     img.src = url;
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,14 +101,7 @@ function applyClientRole(role) {
 function redraw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // Draw the background image first, stretched to fill the entire canvas
-    // (Feature 4). The grid lines and tokens are drawn on top of it so the
-    // cell grid remains legible over the map image.
-    //
-    // We check img.complete to avoid drawing a partially-loaded image, which
-    // would produce a blank or corrupt render. Once onload fires and sets
-    // backgroundImage, this check passes and the image renders correctly.
+
     if (backgroundImage && backgroundImage.complete) {
         ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
     }
@@ -205,12 +129,6 @@ function drawTokens() {
         // Top-left pixel of the token's grid position
         const px = token.x * GRID_SIZE;
         const py = token.y * GRID_SIZE;
-
-        // NEWLY ADDED ─────────────────────────────────────────────────────────
-        // Derive pixel dimensions from token.size (Feature 1).
-        // A size-N token spans N cells in both axes, so its pixel footprint is
-        // N * GRID_SIZE wide and tall. The circle is inscribed in that square,
-        // touching each edge with 4px of padding.
         const tokenSize   = token.size || 1;              // cell count (1–5)
         const tokenPixels = tokenSize * GRID_SIZE;        // full pixel footprint
         const center      = tokenPixels / 2;              // center of footprint
@@ -218,15 +136,6 @@ function drawTokens() {
         // ─────────────────────────────────────────────────────────────────────
 
         const ringColor = ROLE_RING_COLORS[token.role] || "#ffffff";
-
-        // NEWLY ADDED ─────────────────────────────────────────────────────────
-        // Token portrait rendering (Feature 3).
-        //
-        // If a portrait URL is set and the image is in the cache and has loaded,
-        // draw it clipped to the token's circle. Otherwise fall back to the
-        // plain colored circle. The cache look-up is synchronous — if the entry
-        // doesn't exist yet we start loading it in the background and draw the
-        // fallback for this frame.
         const cachedImg = token.image_url ? tokenImageCache.get(token.image_url) : null;
         const imageReady = cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0;
 
@@ -283,9 +192,7 @@ function drawTokens() {
             ctx.fillText(token.label || "?", px + center, py + center);
         }
 
-        // Role badge — always shown regardless of whether a portrait is present.
-        // NEWLY ADDED: position uses tokenPixels instead of GRID_SIZE so the
-        // badge stays in the bottom-right corner for multi-cell tokens (Feature 1).
+
         const roleInitials = { player: "P", pet: "T", enemy: "E", npc: "N" };
         const badge = roleInitials[token.role];
         if (badge) {
@@ -296,15 +203,7 @@ function drawTokens() {
             ctx.fillText(badge, px + tokenPixels - 2, py + tokenPixels - 2); // NEWLY ADDED tokenPixels
         }
 
-        // NEWLY ADDED ─────────────────────────────────────────────────────────
-        // Status indicator dots (Feature 2).
-        //
-        // We draw a row of small filled circles just below the token's footprint.
-        // Each dot corresponds to one status. Up to 4 dots are shown; if there
-        // are more than 4 statuses a "+N" label is appended to signal overflow.
-        //
-        // Colors cycle through STATUS_COLORS by index so adjacent statuses are
-        // visually distinct even if the status names are long or similar.
+
         if (token.statuses && token.statuses.length > 0) {
             const MAX_DOTS = 4;          // maximum dots before the overflow label
             const DOT_R    = Math.max(3, Math.min(6, Math.round(GRID_SIZE * 0.12))); // radius scales with cell
@@ -344,13 +243,6 @@ function drawTokens() {
 
 // ─── Token state functions ─────────────────────────────────
 
-// NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// placeToken now accepts size, statuses, and imageUrl (Features 1, 2, 3).
-//
-// For the image: we pre-warm the tokenImageCache here so the portrait starts
-// loading in the background immediately when the token is created. By the time
-// the user looks at the token, the image will likely already be cached and ready
-// to draw without any visible loading delay.
 function placeToken(id, x, y, ownerID, role, size, statuses, imageUrl) {
     tokens[id] = {
         x,
@@ -395,14 +287,6 @@ function pixelToGrid(px, py) {
 }
 
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
-// getTokenAtPixel updated for multi-cell token footprints (Feature 1).
-//
-// Previously this only checked if the clicked cell matched token.x / token.y
-// exactly. A size-N token occupies cells (x, y) through (x+N-1, y+N-1), so we
-// must check whether the clicked cell falls anywhere inside that rectangle.
-//
-// Without this change, clicking anywhere on a large token except its top-left
-// cell would fail to select it — very confusing for dragons and boss creatures.
 function getTokenAtPixel(px, py) {
     const grid = pixelToGrid(px, py);
     for (const id in tokens) {
@@ -427,9 +311,6 @@ function iOwnToken(tokenId) {
         : token.owner_id === clientID;
 }
 
-// When the cursor leaves the canvas, cancel the pending hover timer and remove
-// any visible card. Without this, a card triggered near the canvas edge would
-// stay on screen indefinitely after the cursor has left.
 canvas.addEventListener("mouseleave", () => {
     clearTimeout(hoverTimer);
     hideHoverCard();
@@ -457,7 +338,53 @@ canvas.addEventListener("mousedown", (e) => {
         if (hit) {
             if (!iOwnToken(id)) return;
             dragging = id;
+            selectedToken = id;
             return;
+        }
+    }
+});
+
+document.addEventListener("keydown", (e) => {
+    
+    const token = tokens[selectedToken]
+    if(!canvasReady || !selectedToken || !token) return;
+    if (!iOwnToken(selectedToken)) return;
+    
+    gridX = token.x;
+    gridY = token.y;
+    
+    switch (e.key) {
+        case "ArrowUp":
+        case "w": {
+            e.preventDefault();
+            const newY = Math.max(0, gridY - 1);
+            moveToken(selectedToken, gridX, newY);
+            sendTokenMove(selectedToken, gridX, newY);
+            break;
+        }
+        case "ArrowDown":
+        case "s": {
+            e.preventDefault();
+            const newY = Math.min(ROWS - (token.size || 1), gridY + 1);
+            moveToken(selectedToken, gridX, newY);
+            sendTokenMove(selectedToken, gridX, newY);
+            break;
+        }
+        case "ArrowLeft":
+        case "a": {
+            e.preventDefault();
+            const newX = Math.max(0, gridX - 1);
+            moveToken(selectedToken, newX, gridY);
+            sendTokenMove(selectedToken, newX, gridY);
+            break;
+        }
+        case "ArrowRight":
+        case "d": {
+            e.preventDefault();
+            const newX = Math.min(COLS - (token.size || 1), gridX + 1);
+            moveToken(selectedToken, newX, gridY);
+            sendTokenMove(selectedToken, newX, gridY);
+            break;
         }
     }
 });
@@ -470,9 +397,7 @@ canvas.addEventListener("mousemove", (e) => {
     const mouseY = e.clientY - rect.top;
 
     // ── Hover card timer logic ────────────────────────────────────────────────
-    // Only runs when the user is NOT dragging. During a drag the cursor is
-    // semantically "on" the dragged token the whole time, so triggering a hover
-    // card would just get in the way.
+
     if (!dragging) {
         const hoveredId = getTokenAtPixel(mouseX, mouseY);
 
@@ -499,24 +424,11 @@ canvas.addEventListener("mousemove", (e) => {
     }
     // ─────────────────────────────────────────────────────────────────────────
 
-    // ── Drag logic (user's version, unmodified) ───────────────────────────────
-    // Step 1: find the grid cell the cursor is currently inside.
-    // No pixel offset is subtracted here — the cursor position alone determines
-    // the cell, which gives consistent cell-level snapping from any grab point.
+
     const cursorGrid = pixelToGrid(e.clientX - rect.left, e.clientY - rect.top);
-    // Step 2: compute the anchor offset for this token's size.
-    // The anchor is the center cell, or the upper-left of the 4 center cells
-    // for even sizes. Math.floor((size - 1) / 2) gives exactly this:
-    //   size 1 → 0   (only cell, no offset needed)
-    //   size 2 → 0   (upper-left of the 4 cells is the top-left)
-    //   size 3 → 1   (center cell is 1 from the top-left in each axis)
-    //   size 4 → 1   (upper-left of the 4 center cells is 1 from top-left)
-    //   size 5 → 2   (center cell is 2 from the top-left in each axis)
+
     const size         = tokens[dragging].size || 1;
     const anchorOffset = Math.floor((size - 1) / 2);
-    // Step 3: shift the token's top-left so the anchor cell sits under the cursor.
-    // Both axes get the same offset because the anchor is always symmetric.
-    // Clamped to 0 so the token cannot be dragged off the top or left edges.
     tokens[dragging].x = Math.max(0, cursorGrid.x - anchorOffset);
     tokens[dragging].y = Math.max(0, cursorGrid.y - anchorOffset);
     redraw();
@@ -560,13 +472,7 @@ canvas.addEventListener("contextmenu", (e) => {
 
 // ─── Token hover card ──────────────────────────────────────────────────────────
 
-// showHoverCard() builds a read-only popup displaying the token's portrait,
-// label, role, size, and statuses. It is shown after the cursor has rested on
-// a token for 1 second without moving. Any user — regardless of ownership —
-// can see this card; it is purely informational and has no buttons.
-//
-// screenX / screenY are viewport-relative pixel coordinates (from clientX/Y)
-// used to position the card near the cursor without converting to grid coords.
+
 function showHoverCard(tokenId, screenX, screenY) {
     // Remove any existing card first — only one should exist at a time.
     hideHoverCard();
@@ -579,10 +485,7 @@ function showHoverCard(tokenId, screenX, screenY) {
     const roleBadgeColor   = ROLE_RING_COLORS[token.role] || "#ffffff";
 
     // ── Build portrait HTML ───────────────────────────────────────────────────
-    // If the token has an image URL that is already in the cache and has loaded,
-    // show it. If the image is still loading or there is no URL, show nothing —
-    // we deliberately don't start a new load here because showHoverCard is called
-    // very frequently and placeToken() already pre-warms the cache on placement.
+    
     const cachedImg   = token.image_url ? tokenImageCache.get(token.image_url) : null;
     const imageReady  = cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0;
     const portraitHTML = imageReady
@@ -633,11 +536,6 @@ function showHoverCard(tokenId, screenX, screenY) {
         pointer-events: none;
         box-shadow: 0 4px 16px rgba(0,0,0,0.5);
     `;
-
-    // pointer-events: none means the card itself never intercepts mouse events,
-    // so the cursor remains "on the canvas" for the purpose of mousemove and
-    // mouseleave handlers. Without this, mousing over the card would trigger
-    // a canvas mouseleave and immediately hide the card.
 
     card.innerHTML = `
         ${portraitHTML}
@@ -788,9 +686,7 @@ function showCanvasSetupModal() {
     let backgroundUrlDraft = null; // NEWLY ADDED (Feature 4)
 
     // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // Live pixel-dimension preview. Now reads grid_size as well as cols/rows
-    // (Feature 5) so the preview is always accurate regardless of which input
-    // the admin changed last.
+
     function updatePreview() {
         const c  = parseInt(colsInput.value)     || 0;
         const r  = parseInt(rowsInput.value)     || 0;
@@ -804,14 +700,7 @@ function showCanvasSetupModal() {
     // ─────────────────────────────────────────────────────────────────────────
 
     // NEWLY ADDED ─────────────────────────────────────────────────────────────
-    // Background image upload handler (Feature 4).
-    //
-    // When the admin picks a file:
-    //   1. Upload it immediately via uploadImage() (defined in network.js).
-    //   2. Store the returned URL in backgroundUrlDraft for use on confirm.
-    //   3. If the server returned image dimensions, auto-populate cols and rows
-    //      by dividing width_px / height_px by the current grid_size value.
-    //   4. Show a thumbnail preview so the admin can verify the image.
+
     bgFileInput.addEventListener("change", async () => {
         const file = bgFileInput.files[0];
         if (!file) return;
@@ -827,9 +716,6 @@ function showCanvasSetupModal() {
             bgPreview.src     = result.url;
             bgPreview.style.display = "block";
 
-            // Auto-populate cols/rows from image dimensions if available.
-            // We read the current grid_size so the calculation uses whatever
-            // cell size the admin has selected (Feature 5 integration).
             if (result.width_px && result.height_px) {
                 const gs = parseInt(gridSizeInput.value) || GRID_SIZE;
                 const suggestedCols = Math.max(5, Math.round(result.width_px  / gs));
@@ -870,11 +756,6 @@ function showCanvasSetupModal() {
             alert("Cell size must be between 20 and 120 px."); return;
         }
 
-        // Send all four values to the server.
-        // The server validates, stores, and broadcasts "canvas_configured" back
-        // to all clients. Each client's applyCanvasSize() + applyCanvasBackground()
-        // then runs from the network.js handler, not directly here, so the admin's
-        // own canvas resizes via the same code path as everyone else's.
         sendCanvasSize(cols, rows, gridSize, backgroundUrlDraft); // NEWLY ADDED gridSize + backgroundUrlDraft
         overlay.remove();
     });
@@ -1085,8 +966,6 @@ function showTokenMenu(tokenId) {
     const screenY = rect.top  + (token.y * GRID_SIZE);
 
     // NEWLY ADDED (Feature 2): initialise a local copy of statuses that the
-    // user can edit before hitting Save. We copy rather than reference so that
-    // cancelling the menu leaves the token's statuses unchanged.
     let localStatuses = [...(token.statuses || [])];
 
     const menu = document.createElement("div");
@@ -1225,12 +1104,7 @@ function showTokenMenu(tokenId) {
     // ─────────────────────────────────────────────────────────────────────────
 
     // NEWLY ADDED (Feature 2) ─────────────────────────────────────────────────
-    // renderStatusList() builds the current statuses as DOM nodes with × remove
-    // buttons. We call it on load and after every add/remove so the list always
-    // reflects localStatuses accurately.
-    //
-    // We use DOM creation rather than innerHTML here because each × button needs
-    // a closure over its specific index, and innerHTML would wipe event listeners.
+
     function renderStatusList() {
         const container = document.getElementById("menu-status-list");
         container.innerHTML = "";  // clear and re-render
