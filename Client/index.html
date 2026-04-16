@@ -6,11 +6,6 @@
     body { margin: 0; background: #1a1a2e; }
     canvas { display: block; cursor: crosshair; }
 
-    /*
-     * Full-viewport overlay base styles shared by the setup modal and the
-     * player waiting screen. Both are injected into the DOM at runtime by
-     * canvas.js and removed when no longer needed.
-     */
     #canvas-setup-overlay,
     #waiting-screen {
         position: fixed;
@@ -23,38 +18,18 @@
         font-family: sans-serif;
     }
 
-    /*
-     * NEWLY ADDED ─────────────────────────────────────────────────────────────
-     * The setup modal card is now wider and scrollable (Features 3, 4, 5).
-     *
-     * Why wider?
-     *   The original 380px card was sized for just cols/rows inputs. Adding the
-     *   background image upload section (Feature 4), the cell size input (Feature
-     *   5), and a thumbnail preview makes the card significantly taller and
-     *   benefits from a bit more horizontal breathing room.
-     *
-     * Why max-height + overflow-y?
-     *   On short screens (e.g. laptops with 768px height) the card could exceed
-     *   the viewport. overflow-y: auto gives the card an internal scrollbar
-     *   rather than letting it bleed off the bottom of the screen.
-     * ─────────────────────────────────────────────────────────────────────────
-     */
     #canvas-setup-overlay > div {
         background: #1a1a2e;
         border: 1px solid #444466;
         border-radius: 10px;
         padding: 28px 32px;
         min-width: 320px;
-        max-width: 460px;       /* NEWLY ADDED: wider than the previous 380px */
-        max-height: 90vh;       /* NEWLY ADDED: prevents overflow on short screens */
-        overflow-y: auto;       /* NEWLY ADDED: internal scroll if card is tall */
+        max-width: 460px;
+        max-height: 90vh;
+        overflow-y: auto;
         color: white;
     }
 
-    /*
-     * Role indicator badge — structural styles only.
-     * Background color is set by applyClientRole() in canvas.js.
-     */
     #role-indicator {
         position: fixed;
         top: 12px;
@@ -71,16 +46,6 @@
         user-select: none;
     }
 
-    /*
-     * NEWLY ADDED ─────────────────────────────────────────────────────────────
-     * Shared style for the dashed upload drop-zones used in the setup modal
-     * (background image) and the token creation/edit modals (portrait image).
-     *
-     * Defined here in CSS so the JS only has to inject the element id —
-     * the visual style is consistent across all three modals without
-     * duplicating the cssText in each innerHTML block.
-     * ─────────────────────────────────────────────────────────────────────────
-     */
     .vtt-upload-zone {
         display: flex;
         align-items: center;
@@ -97,6 +62,72 @@
     .vtt-upload-zone:hover {
         border-color: #7c3aed;
         color: #c4b5fd;
+    }
+
+    /* ── Shape panel ────────────────────────────────────────────────────────── */
+
+    /*
+     * Fixed panel anchored to the vertical center of the right edge.
+     * z-index 500 keeps it above the canvas but below token menus (1000)
+     * and overlays (3000).
+     */
+    #shape-panel {
+        position: fixed;
+        right: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        background: #1a1a2e;
+        border: 1px solid #444466;
+        border-right: none;
+        border-radius: 8px 0 0 8px;
+        padding: 10px 8px 12px;
+        z-index: 500;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        width: 76px;
+        font-family: sans-serif;
+        user-select: none;
+        box-shadow: -2px 0 12px rgba(0, 0, 0, 0.5);
+    }
+
+    .shape-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 3px;
+        background: #2a2a3e;
+        color: #c0c0d8;
+        border: 1px solid #444466;
+        border-radius: 6px;
+        padding: 7px 4px 5px;
+        cursor: pointer;
+        font-size: 11px;
+        font-family: sans-serif;
+        line-height: 1;
+        transition: background 0.12s, border-color 0.12s, color 0.12s;
+        width: 100%;
+    }
+
+    .shape-btn:hover {
+        background: #35355a;
+        border-color: #7c3aed;
+        color: #e0e0ff;
+    }
+
+    /*
+     * Active state: the currently selected shape tool gets a purple tint
+     * so the user always knows which mode they're in.
+     */
+    .shape-btn.active {
+        background: rgba(124, 58, 237, 0.25);
+        border-color: #7c3aed;
+        color: #c4b5fd;
+    }
+
+    .shape-icon {
+        font-size: 18px;
+        line-height: 1;
     }
   </style>
 </head>

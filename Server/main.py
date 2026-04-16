@@ -58,6 +58,7 @@ CANVAS_MAX_ROWS = 100
 
 game_state = {
     "tokens": {},
+    "shapes": {},   # id → shape object (circle / square / cone / line)
     "barriers": barriers,
     # NEWLY ADDED: canvas now stores grid_size and background_url in addition
     # to cols/rows. Full shape once configured:
@@ -77,6 +78,16 @@ def can_act_on_token(client_id: str, token_id: str) -> bool:
     if not token:
         return False
     return client_id in token.get("owners", [])
+
+
+def can_act_on_shape(client_id: str, shape_id: str) -> bool:
+    """Admin can act on any shape; players can only act on their own."""
+    if is_admin(client_id):
+        return True
+    shape = game_state["shapes"].get(shape_id)
+    if not shape:
+        return False
+    return shape.get("owner_id") == client_id
 
 
 ROLE_PERMISSIONS: dict[str, list[str]] = {
@@ -559,6 +570,142 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     print("token not found in game_state at all")
 
+            # ── Shape messages ────────────────────────────────────────────────
+
+            elif msg["type"] == "place_shape":
+                if game_state["canvas"] is None:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "message": "Canvas has not been configured yet."
+                    }))
+                    continue
+
+                shape_id  = msg.get("shape_id", str(uuid.uuid4()))
+                shape_raw = msg.get("shape", {})
+                stype     = shape_raw.get("type")
+                color     = str(shape_raw.get("color", "#e04040"))[:7]
+
+                if stype not in ("circle", "square", "cone", "line"):
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "message": f"Unknown shape type: {stype}"
+                    }))
+                    continue
+
+                try:
+                    if stype == "circle":
+                        stored = {
+                            "type": "circle",
+                            "rootX":  int(shape_raw["rootX"]),
+                            "rootY":  int(shape_raw["rootY"]),
+                            "radius": float(shape_raw["radius"]),
+                            "color":  color,
+                        }
+                    elif stype == "square":
+                        stored = {
+                            "type": "square",
+                            "rootX": int(shape_raw["rootX"]),
+                            "rootY": int(shape_raw["rootY"]),
+                            "size":  int(shape_raw["size"]),
+                            "color": color,
+                        }
+                    elif stype == "cone":
+                        stored = {
+                            "type":     "cone",
+                            "rootFX":   float(shape_raw["rootFX"]),
+                            "rootFY":   float(shape_raw["rootFY"]),
+                            "radius":   float(shape_raw["radius"]),
+                            "dirAngle": float(shape_raw["dirAngle"]),
+                            "color":    color,
+                        }
+                    else:  # line
+                        stored = {
+                            "type":  "line",
+                            "rootX": int(shape_raw["rootX"]),
+                            "rootY": int(shape_raw["rootY"]),
+                            "edgeX": int(shape_raw["edgeX"]),
+                            "edgeY": int(shape_raw["edgeY"]),
+                            "color": color,
+                        }
+                except (KeyError, ValueError, TypeError) as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "message": f"Invalid shape data: {exc}"
+                    }))
+                    continue
+
+                stored["owner_id"] = client_id
+                game_state["shapes"][shape_id] = stored
+
+                for cid, client in connected_clients.items():
+                    if cid != client_id:
+                        await client.send_text(json.dumps({
+                            "type":     "shape_placed",
+                            "shape_id": shape_id,
+                            "owner_id": client_id,
+                            "shape":    stored,
+                        }))
+
+            elif msg["type"] == "move_shape":
+                shape_id = msg.get("shape_id")
+                if shape_id not in game_state["shapes"]:
+                    continue
+                if not can_act_on_shape(client_id, shape_id):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "You do not have permission to move this shape."
+                    }))
+                    continue
+
+                shape = game_state["shapes"][shape_id]
+                try:
+                    if shape["type"] == "cone":
+                        shape["rootFX"] = float(msg["rootFX"])
+                        shape["rootFY"] = float(msg["rootFY"])
+                    elif shape["type"] == "line":
+                        shape["rootX"] = int(msg["rootX"])
+                        shape["rootY"] = int(msg["rootY"])
+                        shape["edgeX"] = int(msg["edgeX"])
+                        shape["edgeY"] = int(msg["edgeY"])
+                    else:  # circle, square
+                        shape["rootX"] = int(msg["rootX"])
+                        shape["rootY"] = int(msg["rootY"])
+                except (KeyError, ValueError, TypeError) as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "message": f"Invalid move data: {exc}"
+                    }))
+                    continue
+
+                for cid, client in connected_clients.items():
+                    if cid != client_id:
+                        await client.send_text(json.dumps({
+                            "type":     "shape_moved",
+                            "shape_id": shape_id,
+                            # Send all possible position fields; receiver ignores
+                            # the ones that don't apply to this shape type.
+                            "rootX":  shape.get("rootX"),
+                            "rootY":  shape.get("rootY"),
+                            "rootFX": shape.get("rootFX"),
+                            "rootFY": shape.get("rootFY"),
+                            "edgeX":  shape.get("edgeX"),
+                            "edgeY":  shape.get("edgeY"),
+                        }))
+
+            elif msg["type"] == "delete_shape":
+                shape_id = msg.get("shape_id")
+                if shape_id not in game_state["shapes"]:
+                    continue
+                if not can_act_on_shape(client_id, shape_id):
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "You do not have permission to delete this shape."
+                    }))
+                    continue
+                del game_state["shapes"][shape_id]
+                for cid, client in connected_clients.items():
+                    if cid != client_id:
+                        await client.send_text(json.dumps({
+                            "type":     "shape_deleted",
+                            "shape_id": shape_id,
+                        }))
+
     except WebSocketDisconnect:
         del client_info[client_id]
         del connected_clients[client_id]
@@ -595,6 +742,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     except OSError:
                         pass  # Non-fatal — the file will just sit there harmlessly
 
+                game_state["shapes"] = {}
                 game_state["canvas"] = None
                 # ─────────────────────────────────────────────────────────────
 

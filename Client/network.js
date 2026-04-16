@@ -43,23 +43,21 @@ socket.onmessage = (event) => {
 
     } else if (msg.type === "token_moved") {
         moveToken(msg.token_id, msg.x, msg.y);
+        checkTokenAoe(msg.token_id);
 
     } else if (msg.type === "token_placed") {
-        // NEWLY ADDED ─────────────────────────────────────────────────────────
-        // Pass the three new token fields to placeToken() so that tokens placed
-        // by remote clients render at the correct size, show their portrait
-        // image, and display any pre-existing statuses immediately.
         placeToken(
             msg.token_id,
             msg.token.x,
             msg.token.y,
             msg.owner_id,
             msg.token.role,
-            msg.token.size,       // NEWLY ADDED (Feature 1) — cell footprint
-            msg.token.statuses,   // NEWLY ADDED (Feature 2) — status list
-            msg.token.image_url   // NEWLY ADDED (Feature 3) — portrait URL
+            msg.token.size,
+            msg.token.statuses,
+            msg.token.image_url,
+            msg.token.label,    // now passed so other clients show the correct name
+            msg.token.color     // and the correct colour from the moment of placement
         );
-        // ─────────────────────────────────────────────────────────────────────
 
     } else if (msg.type === "token_updated") {
         if (tokens[msg.token_id]) {
@@ -99,6 +97,15 @@ socket.onmessage = (event) => {
         // ─────────────────────────────────────────────────────────────────────
         delete tokens[msg.token_id];
         redraw();
+
+    } else if (msg.type === "shape_placed") {
+        placeShapeFromServer(msg.shape_id, msg.owner_id, msg.shape);
+
+    } else if (msg.type === "shape_moved") {
+        moveShapeFromServer(msg.shape_id, msg);
+
+    } else if (msg.type === "shape_deleted") {
+        deleteShapeFromServer(msg.shape_id);
 
     } else if (msg.type === "role_change") {
         if (msg.promoted) {
@@ -185,6 +192,41 @@ function sendCanvasSize(cols, rows, gridSize, backgroundUrl) {
 function sendTokenDelete(tokenId) {
     socket.send(JSON.stringify({ type: "delete_token", token_id: tokenId }));
 }
+
+// ─── Shape message helpers ────────────────────────────────────────────────────
+
+// Notify the server (and through it all other clients) that a new shape was placed.
+function sendShapePlace(shapeId, shape) {
+    socket.send(JSON.stringify({
+        type:     "place_shape",
+        shape_id: shapeId,
+        shape:    shape,
+    }));
+}
+
+// Notify the server that a shape's position changed (sent on drag release).
+// Only the position fields that apply to this shape type are sent.
+function sendShapeMove(shapeId, shape) {
+    const msg = { type: "move_shape", shape_id: shapeId };
+    if (shape.type === "cone") {
+        msg.rootFX = shape.rootFX;
+        msg.rootFY = shape.rootFY;
+    } else {
+        msg.rootX = shape.rootX;
+        msg.rootY = shape.rootY;
+        if (shape.type === "line") {
+            msg.edgeX = shape.edgeX;
+            msg.edgeY = shape.edgeY;
+        }
+    }
+    socket.send(JSON.stringify(msg));
+}
+
+// Notify the server that a shape was deleted.
+function sendShapeDelete(shapeId) {
+    socket.send(JSON.stringify({ type: "delete_shape", shape_id: shapeId }));
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
 // uploadImage(file, endpoint) — shared HTTP upload helper (Features 3 and 4).
