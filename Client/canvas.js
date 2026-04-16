@@ -526,10 +526,12 @@ function getGhostShape() {
                      radius: Math.sqrt(dx * dx + dy * dy) };
         }
         case 'square': {
-            const dxG = currentMouseGrid.x - shapePlacementRoot.x;
-            const dyG = currentMouseGrid.y - shapePlacementRoot.y;
-            return { type: 'square', rootX: shapePlacementRoot.x, rootY: shapePlacementRoot.y,
-                     size: Math.max(1, Math.max(Math.abs(dxG), Math.abs(dyG))) };
+            const dxG   = currentMouseGrid.x - shapePlacementRoot.x;
+            const dyG   = currentMouseGrid.y - shapePlacementRoot.y;
+            const sizeG = Math.max(1, Math.max(Math.abs(dxG), Math.abs(dyG)));
+            const drawX = dxG >= 0 ? shapePlacementRoot.x : shapePlacementRoot.x - sizeG + 1;
+            const drawY = dyG >= 0 ? shapePlacementRoot.y : shapePlacementRoot.y - sizeG + 1;
+            return { type: 'square', rootX: drawX, rootY: drawY, size: sizeG };
         }
         case 'cone': {
             const dx = currentMouseWall.fx - shapePlacementRoot.fx;
@@ -919,18 +921,21 @@ function drawShapeGhost() {
             }
 
             case 'square': {
-                const rootTlx = shapePlacementRoot.x * GRID_SIZE;
-                const rootTly = shapePlacementRoot.y * GRID_SIZE;
-                const dxG  = currentMouseGrid.x - shapePlacementRoot.x;
-                const dyG  = currentMouseGrid.y - shapePlacementRoot.y;
-                const sizeG  = Math.max(1, Math.max(Math.abs(dxG), Math.abs(dyG)));
+                const dxG   = currentMouseGrid.x - shapePlacementRoot.x;
+                const dyG   = currentMouseGrid.y - shapePlacementRoot.y;
+                const sizeG = Math.max(1, Math.max(Math.abs(dxG), Math.abs(dyG)));
+                // Top-left of the drawn square depends on which quadrant the cursor is in.
+                const drawX = dxG >= 0 ? shapePlacementRoot.x : shapePlacementRoot.x - sizeG + 1;
+                const drawY = dyG >= 0 ? shapePlacementRoot.y : shapePlacementRoot.y - sizeG + 1;
                 ctx.beginPath();
-                ctx.rect(rootTlx, rootTly, sizeG * GRID_SIZE, sizeG * GRID_SIZE);
+                ctx.rect(drawX * GRID_SIZE, drawY * GRID_SIZE, sizeG * GRID_SIZE, sizeG * GRID_SIZE);
                 ctx.fill();
                 ctx.stroke();
                 ctx.setLineDash([]);
+                // Root dot stays on the root cell, not necessarily the top-left corner.
                 ctx.beginPath();
-                ctx.arc(rootTlx, rootTly, 4, 0, Math.PI * 2);
+                ctx.arc((shapePlacementRoot.x + 0.5) * GRID_SIZE,
+                        (shapePlacementRoot.y + 0.5) * GRID_SIZE, 4, 0, Math.PI * 2);
                 ctx.fillStyle = hexToRgba(color, 0.95);
                 ctx.fill();
                 break;
@@ -1011,11 +1016,13 @@ function finalizeShape(edgeSnap) {
             break;
         }
         case 'square': {
-            const dxG = edgeSnap.x - shapePlacementRoot.x;
-            const dyG = edgeSnap.y - shapePlacementRoot.y;
-            const size = Math.max(1, Math.max(Math.abs(dxG), Math.abs(dyG)));
+            const dxG   = edgeSnap.x - shapePlacementRoot.x;
+            const dyG   = edgeSnap.y - shapePlacementRoot.y;
+            const size  = Math.max(1, Math.max(Math.abs(dxG), Math.abs(dyG)));
+            const drawX = dxG >= 0 ? shapePlacementRoot.x : shapePlacementRoot.x - size + 1;
+            const drawY = dyG >= 0 ? shapePlacementRoot.y : shapePlacementRoot.y - size + 1;
             shapes[id] = { id, type: 'square',
-                rootX: shapePlacementRoot.x, rootY: shapePlacementRoot.y,
+                rootX: drawX, rootY: drawY,
                 size, color: shapeColor, owner_id: clientID };
             break;
         }
@@ -1064,7 +1071,7 @@ function updateDistanceTooltip(screenX, screenY) {
             const dxF = currentMouseWall.fx - rootCxF;
             const dyF = currentMouseWall.fy - rootCyF;
             distCells = Math.sqrt(dxF * dxF + dyF * dyF);
-            label = `r = ${distCells.toFixed(1)} cells`;
+            label = `r = ${distCells.toFixed(1)*5} feet`;
             break;
         }
         case 'cone': {
@@ -1072,21 +1079,21 @@ function updateDistanceTooltip(screenX, screenY) {
             const dxF = currentMouseWall.fx - shapePlacementRoot.fx;
             const dyF = currentMouseWall.fy - shapePlacementRoot.fy;
             distCells = Math.sqrt(dxF * dxF + dyF * dyF);
-            label = `r = ${distCells.toFixed(1)} cells`;
+            label = `r = ${distCells.toFixed(1)*5} feet`;
             break;
         }
         case 'square': {
             const dx = currentMouseGrid.x - shapePlacementRoot.x;
             const dy = currentMouseGrid.y - shapePlacementRoot.y;
             const s  = Math.max(1, Math.max(Math.abs(dx), Math.abs(dy)));
-            label = `${s} × ${s} cells`;
+            label = `${s*5} × ${s*5} feet`;
             break;
         }
         case 'line': {
             const dx = currentMouseGrid.x - shapePlacementRoot.x;
             const dy = currentMouseGrid.y - shapePlacementRoot.y;
             distCells = Math.sqrt(dx * dx + dy * dy);
-            label = `${distCells.toFixed(1)} cells`;
+            label = `${distCells.toFixed(1)*5} feet`;
             break;
         }
         default: return;
