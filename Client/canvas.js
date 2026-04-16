@@ -135,6 +135,11 @@ function drawTokens() {
     for (const id in tokens) {
         const token = tokens[id];
 
+        const isOwner = iOwnToken(id);
+
+        // Hidden tokens: invisible to non-owners, 50% opacity to owners.
+        if (token.hidden && !isOwner) continue;
+
         const px = token.x * GRID_SIZE;
         const py = token.y * GRID_SIZE;
         const tokenSize   = token.size || 1;
@@ -154,14 +159,19 @@ function drawTokens() {
             tokenImageCache.set(token.image_url, img);
         }
 
+        // Apply 50% opacity for hidden tokens visible only to their owner.
+        if (token.hidden) ctx.globalAlpha = 0.5;
+
         if (imageReady) {
             ctx.save();
+            ctx.globalAlpha = token.hidden ? 0.5 : 1;
             ctx.beginPath();
             ctx.arc(px + center, py + center, radius, 0, Math.PI * 2);
             ctx.clip();
             ctx.drawImage(cachedImg, px, py, tokenPixels, tokenPixels);
             ctx.restore();
 
+            ctx.globalAlpha = token.hidden ? 0.5 : 1;
             ctx.beginPath();
             ctx.arc(px + center, py + center, radius, 0, Math.PI * 2);
             ctx.strokeStyle = ringColor;
@@ -169,6 +179,7 @@ function drawTokens() {
             ctx.stroke();
 
         } else {
+            ctx.globalAlpha = token.hidden ? 0.5 : 1;
             ctx.beginPath();
             ctx.arc(px + center, py + center, radius, 0, Math.PI * 2);
             ctx.fillStyle = token.color || "#e94560";
@@ -185,7 +196,6 @@ function drawTokens() {
             ctx.fillText(token.label || "?", px + center, py + center);
         }
 
-
         const roleInitials = { player: "P", pet: "T", enemy: "E", npc: "N" };
         const badge = roleInitials[token.role];
         if (badge) {
@@ -195,7 +205,6 @@ function drawTokens() {
             ctx.textBaseline = "bottom";
             ctx.fillText(badge, px + tokenPixels - 2, py + tokenPixels - 2);
         }
-
 
         if (token.statuses && token.statuses.length > 0) {
             const MAX_DOTS = 4;
@@ -226,12 +235,15 @@ function drawTokens() {
                 );
             }
         }
+
+        // Always reset globalAlpha after each token.
+        ctx.globalAlpha = 1;
     }
 }
 
 // ─── Token state functions ─────────────────────────────────
 
-function placeToken(id, x, y, ownerID, role, size, statuses, imageUrl, label, color) {
+function placeToken(id, x, y, ownerID, role, size, statuses, imageUrl, label, color, hidden) {
     tokens[id] = {
         x,
         y,
@@ -242,6 +254,7 @@ function placeToken(id, x, y, ownerID, role, size, statuses, imageUrl, label, co
         image_url: imageUrl  || null,
         label:     label     || "?",
         color:     color     || "#e94560",
+        hidden:    hidden    || false,
     };
 
     if (imageUrl && !tokenImageCache.has(imageUrl)) {
@@ -304,6 +317,8 @@ function getTokenAtPixel(px, py) {
     for (const id in tokens) {
         const t    = tokens[id];
         const size = t.size || 1;
+        // Hidden tokens are invisible to non-owners — they can't be clicked.
+        if (t.hidden && !iOwnToken(id)) continue;
         if (grid.x >= t.x && grid.x < t.x + size &&
             grid.y >= t.y && grid.y < t.y + size) {
             return id;
@@ -1071,7 +1086,7 @@ function updateDistanceTooltip(screenX, screenY) {
             const dxF = currentMouseWall.fx - rootCxF;
             const dyF = currentMouseWall.fy - rootCyF;
             distCells = Math.sqrt(dxF * dxF + dyF * dyF);
-            label = `r = ${distCells.toFixed(1)*5} feet`;
+            label = `r = ${distCells.toFixed(1)} cells`;
             break;
         }
         case 'cone': {
@@ -1079,21 +1094,21 @@ function updateDistanceTooltip(screenX, screenY) {
             const dxF = currentMouseWall.fx - shapePlacementRoot.fx;
             const dyF = currentMouseWall.fy - shapePlacementRoot.fy;
             distCells = Math.sqrt(dxF * dxF + dyF * dyF);
-            label = `r = ${distCells.toFixed(1)*5} feet`;
+            label = `r = ${distCells.toFixed(1)} cells`;
             break;
         }
         case 'square': {
             const dx = currentMouseGrid.x - shapePlacementRoot.x;
             const dy = currentMouseGrid.y - shapePlacementRoot.y;
             const s  = Math.max(1, Math.max(Math.abs(dx), Math.abs(dy)));
-            label = `${s*5} × ${s*5} feet`;
+            label = `${s} × ${s} cells`;
             break;
         }
         case 'line': {
             const dx = currentMouseGrid.x - shapePlacementRoot.x;
             const dy = currentMouseGrid.y - shapePlacementRoot.y;
             distCells = Math.sqrt(dx * dx + dy * dy);
-            label = `${distCells.toFixed(1)*5} feet`;
+            label = `${distCells.toFixed(1)} cells`;
             break;
         }
         default: return;
@@ -1792,6 +1807,12 @@ function showTokenCreationModal(gridX, gridY) {
             <img id="creation-image-preview" style="display:none;max-height:60px;border-radius:4px;object-fit:contain;" />
         </div>
 
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+            <input id="creation-hidden" type="checkbox"
+                style="width:15px;height:15px;cursor:pointer;accent-color:#7c3aed;">
+            Hidden (invisible to other players)
+        </label>
+
         <button id="creation-confirm" style="margin-top:4px;padding:5px;background:#e94560;
             color:white;border:none;border-radius:4px;cursor:pointer;font-weight:bold;">
             Place Token
@@ -1832,10 +1853,11 @@ function showTokenCreationModal(gridX, gridY) {
     });
 
     document.getElementById("creation-confirm").addEventListener("click", () => {
-        const role  = document.getElementById("creation-role").value;
-        const size  = parseInt(document.getElementById("creation-size").value) || 1;
-        const label = document.getElementById("creation-label").value.trim() || "?";
-        const color = document.getElementById("creation-color").value;
+        const role   = document.getElementById("creation-role").value;
+        const size   = parseInt(document.getElementById("creation-size").value) || 1;
+        const label  = document.getElementById("creation-label").value.trim() || "?";
+        const color  = document.getElementById("creation-color").value;
+        const hidden = document.getElementById("creation-hidden").checked;
 
         const tokenId = `${role}_${Date.now()}`;
 
@@ -1846,6 +1868,7 @@ function showTokenCreationModal(gridX, gridY) {
             size,
             statuses:  [],
             image_url: imageUrlDraft,
+            hidden,
         };
 
         if (imageUrlDraft && !tokenImageCache.has(imageUrlDraft)) {
@@ -1855,7 +1878,7 @@ function showTokenCreationModal(gridX, gridY) {
             tokenImageCache.set(imageUrlDraft, img);
         }
 
-        sendTokenPlace(tokenId, gridX, gridY, role, label, color, size, imageUrlDraft);
+        sendTokenPlace(tokenId, gridX, gridY, role, label, color, size, imageUrlDraft, hidden);
         modal.remove();
         redraw();
     });
@@ -1957,6 +1980,12 @@ function showTokenMenu(tokenId) {
                     border:1px solid #444466;border-radius:4px;cursor:pointer;font-size:13px;">Add</button>
             </div>
         </div>
+
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+            <input id="menu-hidden" type="checkbox" ${token.hidden ? "checked" : ""}
+                style="width:15px;height:15px;cursor:pointer;accent-color:#7c3aed;">
+            Hidden (invisible to other players)
+        </label>
 
         <button id="menu-save" style="margin-top:4px;padding:5px;background:#e94560;color:white;
             border:none;border-radius:4px;cursor:pointer;">Save</button>
@@ -2078,11 +2107,13 @@ function showTokenMenu(tokenId) {
         const newLabel  = document.getElementById("menu-label").value.trim() || token.label;
         const newColor  = document.getElementById("menu-color").value;
         const newSize   = parseInt(document.getElementById("menu-size").value) || 1;
+        const newHidden = document.getElementById("menu-hidden").checked;
 
-        tokens[tokenId].label     = newLabel;
-        tokens[tokenId].color     = newColor;
-        tokens[tokenId].size      = newSize;
-        tokens[tokenId].statuses  = [...localStatuses];
+        tokens[tokenId].label   = newLabel;
+        tokens[tokenId].color   = newColor;
+        tokens[tokenId].size    = newSize;
+        tokens[tokenId].statuses = [...localStatuses];
+        tokens[tokenId].hidden  = newHidden;
 
         if (imageUrlDraft !== tokens[tokenId].image_url) {
             tokenImageCache.delete(tokens[tokenId].image_url);
@@ -2095,7 +2126,7 @@ function showTokenMenu(tokenId) {
             }
         }
 
-        sendTokenUpdate(tokenId, newLabel, newColor, newSize, localStatuses, imageUrlDraft);
+        sendTokenUpdate(tokenId, newLabel, newColor, newSize, localStatuses, imageUrlDraft, newHidden);
         menu.remove();
         redraw();
     });

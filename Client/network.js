@@ -55,33 +55,25 @@ socket.onmessage = (event) => {
             msg.token.size,
             msg.token.statuses,
             msg.token.image_url,
-            msg.token.label,    // now passed so other clients show the correct name
-            msg.token.color     // and the correct colour from the moment of placement
+            msg.token.label,
+            msg.token.color,
+            msg.token.hidden ?? false,
         );
 
     } else if (msg.type === "token_updated") {
         if (tokens[msg.token_id]) {
-            tokens[msg.token_id].label = msg.label;
-            tokens[msg.token_id].color = msg.color;
+            tokens[msg.token_id].label     = msg.label;
+            tokens[msg.token_id].color     = msg.color;
+            tokens[msg.token_id].size      = msg.size      ?? 1;
+            tokens[msg.token_id].statuses  = msg.statuses  ?? [];
+            tokens[msg.token_id].hidden    = msg.hidden    ?? false;
 
-            // NEWLY ADDED ─────────────────────────────────────────────────────
-            // Sync the three new fields whenever a token_updated message arrives.
-            // We use the nullish coalescing fallback so existing tokens that
-            // pre-date these fields don't lose their defaults.
-            tokens[msg.token_id].size      = msg.size      ?? 1;   // Feature 1
-            tokens[msg.token_id].statuses  = msg.statuses  ?? [];  // Feature 2
-
-            // NEWLY ADDED (Feature 3) ─────────────────────────────────────────
-            // If the image URL changed, invalidate the cache entry for the OLD
-            // URL so the image is re-fetched. The new URL will be cached by
-            // canvas.js on the next redraw when drawTokens() encounters it.
             const oldUrl = tokens[msg.token_id].image_url;
             const newUrl = msg.image_url ?? null;
             if (oldUrl !== newUrl) {
-                tokenImageCache.delete(oldUrl); // no-op if oldUrl is null/missing
+                tokenImageCache.delete(oldUrl);
             }
             tokens[msg.token_id].image_url = newUrl;
-            // ─────────────────────────────────────────────────────────────────
 
             redraw();
         }
@@ -143,7 +135,7 @@ function sendTokenMove(tokenId, x, y) {
 // sendTokenPlace now carries size and imageUrl (Features 1 and 3).
 // statuses is always an empty array on creation — statuses are added via the
 // edit menu after the token is placed, not at creation time.
-function sendTokenPlace(tokenId, x, y, role, label, color, size, imageUrl) {
+function sendTokenPlace(tokenId, x, y, role, label, color, size, imageUrl, hidden) {
     socket.send(JSON.stringify({
         type:      "place_token",
         token_id:  tokenId,
@@ -152,9 +144,10 @@ function sendTokenPlace(tokenId, x, y, role, label, color, size, imageUrl) {
         role,
         label,
         color,
-        size:      size     ?? 1,    // NEWLY ADDED (Feature 1)
-        statuses:  [],               // always empty at creation
-        image_url: imageUrl ?? null  // NEWLY ADDED (Feature 3)
+        size:      size     ?? 1,
+        statuses:  [],
+        image_url: imageUrl ?? null,
+        hidden:    hidden   ?? false,
     }));
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -162,15 +155,16 @@ function sendTokenPlace(tokenId, x, y, role, label, color, size, imageUrl) {
 // NEWLY ADDED ─────────────────────────────────────────────────────────────────
 // sendTokenUpdate now carries size, statuses, and imageUrl (Features 1, 2, 3).
 // The edit menu in canvas.js collects all three before calling this function.
-function sendTokenUpdate(tokenId, label, color, size, statuses, imageUrl) {
+function sendTokenUpdate(tokenId, label, color, size, statuses, imageUrl, hidden) {
     socket.send(JSON.stringify({
         type:      "update_token",
         token_id:  tokenId,
         label,
         color,
-        size:      size     ?? 1,   // NEWLY ADDED (Feature 1)
-        statuses:  statuses ?? [],  // NEWLY ADDED (Feature 2)
-        image_url: imageUrl ?? null // NEWLY ADDED (Feature 3)
+        size:      size     ?? 1,
+        statuses:  statuses ?? [],
+        image_url: imageUrl ?? null,
+        hidden:    hidden   ?? false,
     }));
 }
 // ─────────────────────────────────────────────────────────────────────────────

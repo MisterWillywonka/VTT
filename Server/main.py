@@ -429,9 +429,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     "role": requested_role,
                     "owners": [client_id],
                     "owner_id": client_id,
-                    "size": token_size,     # NEWLY ADDED (Feature 1)
-                    "statuses": statuses,   # NEWLY ADDED (Feature 2)
-                    "image_url": image_url  # NEWLY ADDED (Feature 3)
+                    "size": token_size,
+                    "statuses": statuses,
+                    "image_url": image_url,
+                    "hidden": bool(msg.get("hidden", False)),
                 }
 
                 for cid, client in connected_clients.items():
@@ -537,6 +538,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             game_state["tokens"][token_id]["image_url"] = None
                     # ─────────────────────────────────────────────────────────
 
+                    if "hidden" in msg:
+                        game_state["tokens"][token_id]["hidden"] = bool(msg["hidden"])
+
                     for cid, client in connected_clients.items():
                         if cid != client_id:
                             await client.send_text(json.dumps({
@@ -544,11 +548,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "token_id": token_id,
                                 "label": msg["label"],
                                 "color": msg["color"],
-                                # NEWLY ADDED: broadcast all mutable token fields
-                                # so every client's local copy stays in sync.
                                 "size":      game_state["tokens"][token_id].get("size", 1),
                                 "statuses":  game_state["tokens"][token_id].get("statuses", []),
-                                "image_url": game_state["tokens"][token_id].get("image_url", None)
+                                "image_url": game_state["tokens"][token_id].get("image_url", None),
+                                "hidden":    game_state["tokens"][token_id].get("hidden", False),
                             }))
 
             elif msg["type"] == "delete_token":
