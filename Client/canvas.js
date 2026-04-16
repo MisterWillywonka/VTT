@@ -1086,7 +1086,7 @@ function updateDistanceTooltip(screenX, screenY) {
             const dxF = currentMouseWall.fx - rootCxF;
             const dyF = currentMouseWall.fy - rootCyF;
             distCells = Math.sqrt(dxF * dxF + dyF * dyF);
-            label = `r = ${distCells.toFixed(1)} cells`;
+            label = `r = ${distCells.toFixed(1)*5} feet`;
             break;
         }
         case 'cone': {
@@ -1094,21 +1094,21 @@ function updateDistanceTooltip(screenX, screenY) {
             const dxF = currentMouseWall.fx - shapePlacementRoot.fx;
             const dyF = currentMouseWall.fy - shapePlacementRoot.fy;
             distCells = Math.sqrt(dxF * dxF + dyF * dyF);
-            label = `r = ${distCells.toFixed(1)} cells`;
+            label = `r = ${distCells.toFixed(1)*5} feet`;
             break;
         }
         case 'square': {
             const dx = currentMouseGrid.x - shapePlacementRoot.x;
             const dy = currentMouseGrid.y - shapePlacementRoot.y;
             const s  = Math.max(1, Math.max(Math.abs(dx), Math.abs(dy)));
-            label = `${s} × ${s} cells`;
+            label = `${s*5} × ${s*5} feet`;
             break;
         }
         case 'line': {
             const dx = currentMouseGrid.x - shapePlacementRoot.x;
             const dy = currentMouseGrid.y - shapePlacementRoot.y;
             distCells = Math.sqrt(dx * dx + dy * dy);
-            label = `${distCells.toFixed(1)} cells`;
+            label = `${distCells.toFixed(1)*5} feet`;
             break;
         }
         default: return;
